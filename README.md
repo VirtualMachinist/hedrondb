@@ -53,7 +53,7 @@ Notes without `extra.domain` stay without it. A domain filter drops those rows; 
 hedron-import --src DIR --db FILE --vault NAME --agent NAME [--htec-path PATH] [--exclude-prefix mail_room/Uri/]
 ```
 
-GROK.md / HAL `supersedes` in frontmatter stays on the node `extra`. It is not written as `Event.supersedes`.
+Frontmatter is the first `---` YAML fence; a deprecated `<!-- hal:authoritative:yaml -->` comment above it is ignored. HAL is the YAML keys (`name`, `title`, `domain`, …), not that html wrapper. GROK.md / HAL `supersedes` stays on the node `extra`. It is not written as `Event.supersedes`. Do not infer `extra.domain` or `extra.name` from the path.
 
 ## Not in this repo
 
