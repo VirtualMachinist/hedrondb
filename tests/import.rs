@@ -136,3 +136,150 @@ fn import_refuses_existing_db_without_force() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("refuse existing store"));
 }
+
+#[test]
+fn import_yaml_fence_after_deprecated_hal_comment() {
+    let src = TempTree::new("src-hal-shim");
+    fs::write(
+        src.path.join("OPERATOR.md"),
+        "<!-- hal:authoritative:yaml -->\n\
+         ---\n\
+         name: Leo OPERATOR\n\
+         title: Operator\n\
+         domain: foundry\n\
+         supersedes: old.md\n\
+         token: should-drop\n\
+         ---\n\
+         Body of Leo.\n",
+    )
+    .unwrap();
+
+    let out = TempTree::new("out-hal-shim");
+    let db = out.path.join("store.db");
+    let result = Command::new(env!("CARGO_BIN_EXE_hedron-import"))
+        .args([
+            "--src",
+            src.path.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--vault",
+            "fixture",
+            "--agent",
+            "importer",
+        ])
+        .output()
+        .expect("run hedron-import");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "import failed: {stderr}{stdout}"
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let extra: String = conn
+        .query_row(
+            "SELECT extra FROM nodes WHERE type = 'Document' AND path = 'OPERATOR.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        extra.contains("name: Leo OPERATOR"),
+        "name from YAML fence must land in extra: {extra}"
+    );
+    assert!(
+        extra.contains("title: Operator"),
+        "title from YAML fence must land in extra: {extra}"
+    );
+    assert!(
+        extra.contains("domain: foundry"),
+        "domain from YAML fence must land in extra: {extra}"
+    );
+    assert!(
+        extra.contains("supersedes: old.md"),
+        "HAL supersedes stays in extra: {extra}"
+    );
+    assert!(
+        !extra.contains("token"),
+        "secret keys must be dropped: {extra}"
+    );
+    assert!(
+        !extra.contains("hal:authoritative"),
+        "deprecated html comment must not be stored in extra: {extra}"
+    );
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 0, "HAL supersedes must not become Event.supersedes");
+    let event_supersedes: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE supersedes IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(event_supersedes, 0);
+}
+
+#[test]
+fn import_hal_comment_without_yaml_fence_leaves_extra_empty() {
+    let src = TempTree::new("src-hal-empty");
+    fs::write(
+        src.path.join("Leo-OPERATOR.md"),
+        "<!-- hal:authoritative:yaml -->\n\
+         name: Leo OPERATOR\n\
+         domain: foundry\n\
+         supersedes: old.md\n\
+         Body without a fence.\n",
+    )
+    .unwrap();
+
+    let out = TempTree::new("out-hal-empty");
+    let db = out.path.join("store.db");
+    let result = Command::new(env!("CARGO_BIN_EXE_hedron-import"))
+        .args([
+            "--src",
+            src.path.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--vault",
+            "fixture",
+            "--agent",
+            "importer",
+        ])
+        .output()
+        .expect("run hedron-import");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "import failed: {stderr}{stdout}"
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let extra: String = conn
+        .query_row(
+            "SELECT extra FROM nodes WHERE type = 'Document' AND path = 'Leo-OPERATOR.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !extra.contains("Leo OPERATOR")
+            && !extra.contains("foundry")
+            && !extra.contains("old.md")
+            && !extra.contains("hal:authoritative"),
+        "html comment is not frontmatter; extra must stay empty of those keys: {extra}"
+    );
+    assert!(
+        !extra.contains("name:") && !extra.contains("domain:"),
+        "do not invent extra.name or extra.domain from the path: {extra}"
+    );
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 0, "HAL supersedes must not become Event.supersedes");
+}
