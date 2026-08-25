@@ -1,10 +1,12 @@
 //! HedronDB Phase 0 core: Desired State, causal Event Log, vault isolation.
 //!
-//! Query current state and causal history through separate APIs. This crate is a
-//! sync rusqlite library — not a server, not a Python/HQL product, not a
-//! general-purpose database.
+//! Query current state and causal history through separate APIs. The product
+//! CLI is `hedron` (`import`, `hql`). This crate is a sync rusqlite library —
+//! not a server, not a general-purpose database.
 
 mod error;
+pub mod hql;
+pub mod import;
 mod store;
 mod types;
 
