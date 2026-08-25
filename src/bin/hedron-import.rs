@@ -264,13 +264,11 @@ fn strip_md(path: &str) -> String {
         .to_string()
 }
 
+/// First `---` ... `---` YAML fence in the file. A BOM or comment may sit above
+/// it. The deprecated `<!-- hal:authoritative:yaml -->` wrapper is ignored.
 fn split_frontmatter(text: &str) -> (Mapping, &str) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let rest = if let Some(r) = text.strip_prefix("---\n") {
-        r
-    } else if let Some(r) = text.strip_prefix("---\r\n") {
-        r
-    } else {
+    let Some(rest) = after_open_fence(text) else {
         return (Mapping::new(), text);
     };
     let close = rest
@@ -294,6 +292,29 @@ fn split_frontmatter(text: &str) -> (Mapping, &str) {
         Ok(Value::Mapping(map)) => (map, body),
         _ => (Mapping::new(), body),
     }
+}
+
+/// Text after the first line that is exactly `---`.
+fn after_open_fence(text: &str) -> Option<&str> {
+    let mut pos = 0;
+    while pos <= text.len() {
+        let rest = &text[pos..];
+        let (line, next) = match rest.find('\n') {
+            Some(i) => {
+                let line = rest[..i].strip_suffix('\r').unwrap_or(&rest[..i]);
+                (line, pos + i + 1)
+            }
+            None => (rest.strip_suffix('\r').unwrap_or(rest), text.len()),
+        };
+        if line == "---" {
+            return Some(&text[next..]);
+        }
+        if next == text.len() {
+            break;
+        }
+        pos = next;
+    }
+    None
 }
 
 fn extra_from_frontmatter(front: &Mapping) -> Value {
