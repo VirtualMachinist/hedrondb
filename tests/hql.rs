@@ -441,20 +441,9 @@ fn state_does_not_pull_event_log_or_tokens() {
     let blob = rows[0]
         .as_dict(None)
         .into_iter()
-        .map(|(k, v)| format!("{k}={}", v.to_display()))
+        .map(|(_, v)| v.to_display())
         .collect::<Vec<_>>()
         .join(" ");
-    // as_dict(None) after select uses selected keys via get path...
-    let selected = rows[0].as_dict(None);
-    let blob = if rows[0].selected_fields().is_some() {
-        selected
-            .iter()
-            .map(|(_, v)| v.to_display())
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        blob
-    };
     assert!(!blob.contains("hdt_"));
     assert!(!blob.contains(EVENT));
 }
