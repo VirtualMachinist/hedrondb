@@ -44,6 +44,7 @@ class Row:
         extra_map: Optional[dict[str, Optional[str]]] = None,
         node_id: Optional[str] = None,
         vault_id: Optional[str] = None,
+        node_type: Optional[str] = None,
         from_id: Optional[str] = None,
         from_path: Optional[str] = None,
         to_id: Optional[str] = None,
@@ -51,6 +52,12 @@ class Row:
         to_path: Optional[str] = None,
         edge_type: Optional[str] = None,
         properties: Optional[str] = None,
+        spec: Optional[str] = None,
+        status: Optional[str] = None,
+        state_version: Optional[int] = None,
+        reconciled_by: Optional[str] = None,
+        importance: Optional[float] = None,
+        state_id: Optional[str] = None,
         selected: Optional[dict[str, Any]] = None,
     ) -> None:
         self.path = path
@@ -58,6 +65,7 @@ class Row:
         self.extra_map = extra_map if extra_map is not None else parse_extra_map(extra)
         self.node_id = node_id
         self.vault_id = vault_id
+        self.node_type = node_type
         self.from_id = from_id
         self.from_path = from_path
         self.to_id = to_id
@@ -65,6 +73,12 @@ class Row:
         self.to_path = to_path
         self.edge_type = edge_type
         self.properties = properties or ""
+        self.spec = spec
+        self.status = status
+        self.state_version = state_version
+        self.reconciled_by = reconciled_by
+        self.importance = importance
+        self.state_id = state_id
         self._selected = selected
 
     def get(self, field: str) -> Any:
@@ -88,12 +102,48 @@ class Row:
         if field == "to.path":
             return self.to_path
         if field == "id":
-            return self.node_id
+            return self.state_id if self.state_id is not None else self.node_id
         if field == "vault_id":
             return self.vault_id
+        if field == "node_type":
+            return self.node_type
         if field == "type":
             return self.edge_type
+        if field == "spec":
+            return self.spec
+        if field == "status":
+            return self.status
+        if field == "state_version":
+            return self.state_version
+        if field == "reconciled_by":
+            return self.reconciled_by
+        if field == "importance":
+            return self.importance
         return None
+
+    def with_state(self, ds: dict[str, Any]) -> "Row":
+        """Warm overlay: latest desired_states fields. Does not touch events."""
+        return Row(
+            path=self.path,
+            extra=self.extra,
+            extra_map=self.extra_map,
+            node_id=self.node_id,
+            vault_id=self.vault_id,
+            node_type=self.node_type,
+            from_id=self.from_id,
+            from_path=self.from_path,
+            to_id=self.to_id,
+            to_raw=self.to_raw,
+            to_path=self.to_path,
+            edge_type=self.edge_type,
+            properties=self.properties,
+            spec=ds.get("spec"),
+            status=ds.get("status"),
+            state_version=ds.get("state_version"),
+            reconciled_by=ds.get("reconciled_by"),
+            importance=ds.get("importance"),
+            state_id=ds.get("id"),
+        )
 
     def project(self, fields: list[str]) -> "Row":
         selected = {field: self._raw_get(field) for field in fields}
@@ -103,6 +153,7 @@ class Row:
             extra_map=self.extra_map,
             node_id=self.node_id,
             vault_id=self.vault_id,
+            node_type=self.node_type,
             from_id=self.from_id,
             from_path=self.from_path,
             to_id=self.to_id,
@@ -110,6 +161,12 @@ class Row:
             to_path=self.to_path,
             edge_type=self.edge_type,
             properties=self.properties,
+            spec=self.spec,
+            status=self.status,
+            state_version=self.state_version,
+            reconciled_by=self.reconciled_by,
+            importance=self.importance,
+            state_id=self.state_id,
             selected=selected,
         )
 

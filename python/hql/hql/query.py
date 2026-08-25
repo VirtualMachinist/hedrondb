@@ -1,4 +1,4 @@
-"""HQL v0 pipeline: vault | search | traverse | filter | select | limit."""
+"""HQL v0 pipeline: vault | agent | state | search | traverse | filter | select | limit."""
 
 from __future__ import annotations
 
@@ -20,6 +20,14 @@ class Query:
 
     def vault(self, name: str) -> "Query":
         self._ops.append(("vault", name))
+        return self
+
+    def agent(self, name: str) -> "Query":
+        self._ops.append(("agent", name))
+        return self
+
+    def state(self) -> "Query":
+        self._ops.append(("state",))
         return self
 
     def search(self, text: str) -> "Query":
@@ -64,6 +72,10 @@ class Query:
             if kind == "vault":
                 vault_ids = set(self._store.vault_ids_named(op[1]))
                 rows = [row for row in rows if row.vault_id in vault_ids]
+            elif kind == "agent":
+                rows = _filter_agents(rows, op[1])
+            elif kind == "state":
+                rows = _apply_state(rows, self._store.latest_desired_states())
             elif kind == "search":
                 needle = op[1]
                 rows = [row for row in rows if _search_hit(row, needle, outgoing, by_id)]
@@ -88,6 +100,14 @@ class Query:
         rest = rest.strip()
         if name == "vault":
             self.vault(_unquote_arg(rest))
+        elif name == "agent":
+            if not rest:
+                raise ValueError("agent requires a name")
+            self.agent(_unquote_arg(rest))
+        elif name == "state":
+            if rest:
+                raise ValueError("state takes no arguments")
+            self.state()
         elif name == "search":
             self.search(_unquote_arg(rest))
         elif name == "traverse":
@@ -198,6 +218,7 @@ def _traverse(
                     extra_map=src.extra_map,
                     node_id=src.node_id,
                     vault_id=src.vault_id,
+                    node_type=src.node_type,
                     from_id=edge["from_id"],
                     from_path=src.path,
                     to_id=edge["to_id"],
@@ -210,6 +231,52 @@ def _traverse(
                 if dest is not None:
                     nxt.append(dest)
         frontier = nxt
+    return emitted
+
+
+def _filter_agents(rows: list[Row], name: str) -> list[Row]:
+    """Keep Agent rows matching extra.name, extra.title, or path. Stay in current slice."""
+    agents = [row for row in rows if row.node_type == "Agent"]
+    exact = [row for row in agents if _agent_exact(row, name)]
+    if exact:
+        return exact
+    return [row for row in agents if _agent_substring(row, name)]
+
+
+def _agent_exact(row: Row, name: str) -> bool:
+    extra_name = row.extra_map.get("name")
+    extra_title = row.extra_map.get("title")
+    if extra_name == name or extra_title == name:
+        return True
+    path = row.path or ""
+    if path == name:
+        return True
+    return _path_basename(path) == name
+
+
+def _agent_substring(row: Row, name: str) -> bool:
+    extra_name = row.extra_map.get("name") or ""
+    extra_title = row.extra_map.get("title") or ""
+    path = row.path or ""
+    return name in extra_name or name in extra_title or name in path
+
+
+def _path_basename(path: str) -> str:
+    if not path:
+        return ""
+    return path.rsplit("/", 1)[-1]
+
+
+def _apply_state(rows: list[Row], latest: dict[str, dict]) -> list[Row]:
+    """Warm only: latest desired_states per vault_id. Does not read the event log."""
+    emitted: list[Row] = []
+    for row in rows:
+        if row.node_type not in ("Agent", "Vault"):
+            continue
+        ds = latest.get(row.vault_id or "")
+        if ds is None:
+            continue
+        emitted.append(row.with_state(ds))
     return emitted
 
 

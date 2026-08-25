@@ -109,6 +109,7 @@ class Store:
                 extra_map=parse_extra_map(row["extra"]),
                 node_id=row["id"],
                 vault_id=row["vault_id"],
+                node_type=row["type"],
             )
             for row in rows
         ]
@@ -129,6 +130,30 @@ class Store:
             }
             for row in rows
         ]
+
+    def latest_desired_states(self) -> dict[str, dict]:
+        """Warm path: newest desired_states row per vault_id. Never reads events."""
+        rows = self.conn.execute(
+            "SELECT id, vault_id, state_version, reconciled_by, importance, spec, status "
+            "FROM desired_states"
+        ).fetchall()
+        latest: dict[str, dict] = {}
+        for row in rows:
+            vault_id = row["vault_id"]
+            version = int(row["state_version"])
+            prev = latest.get(vault_id)
+            if prev is not None and version <= prev["state_version"]:
+                continue
+            latest[vault_id] = {
+                "id": row["id"],
+                "vault_id": vault_id,
+                "state_version": version,
+                "reconciled_by": row["reconciled_by"],
+                "importance": row["importance"],
+                "spec": row["spec"] or "",
+                "status": row["status"] or "",
+            }
+        return latest
 
     def vault_ids_named(self, name: str) -> list[str]:
         ids: list[str] = []
