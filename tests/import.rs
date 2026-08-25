@@ -64,10 +64,7 @@ fn import_resolved_and_dangling_mentions() {
         .expect("run hedron-import");
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        result.status.success(),
-        "import failed: {stderr}{stdout}"
-    );
+    assert!(result.status.success(), "import failed: {stderr}{stdout}");
     assert!(
         !stdout.contains("hdt_") && !stderr.contains("hdt_"),
         "token leaked: {stdout}{stderr}"
@@ -171,10 +168,7 @@ fn import_yaml_fence_after_deprecated_hal_comment() {
         .expect("run hedron-import");
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        result.status.success(),
-        "import failed: {stderr}{stdout}"
-    );
+    assert!(result.status.success(), "import failed: {stderr}{stdout}");
 
     let conn = Connection::open(&db).unwrap();
     let extra: String = conn
@@ -253,10 +247,7 @@ fn import_hal_comment_without_yaml_fence_leaves_extra_empty() {
         .expect("run hedron-import");
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        result.status.success(),
-        "import failed: {stderr}{stdout}"
-    );
+    assert!(result.status.success(), "import failed: {stderr}{stdout}");
 
     let conn = Connection::open(&db).unwrap();
     let extra: String = conn
