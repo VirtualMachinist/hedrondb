@@ -1,0 +1,16 @@
+[package]
+name = "hedron-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "HedronDB Phase 0: desired state, causal event log, vault isolation"
+publish = false
+
+[dependencies]
+# Exact pins keep the crate on rustc 1.83; newer blake3/uuid/indexmap need 1.85.
+blake3 = "=1.8.2"
+indexmap = { version = "=2.7.1", features = ["std"] }
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+serde = { version = "=1.0.217", features = ["derive"] }
+serde_yaml = "=0.9.34"
+uuid = { version = "=1.11.1", features = ["serde", "v4"] }
