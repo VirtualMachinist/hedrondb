@@ -1,0 +1,17 @@
+[project]
+name = "hedrondb-hql"
+version = "0.1.0"
+description = "HQL v0: read-only pipe queries over a HedronDB SQLite store"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Hedronite" }]
+
+[project.scripts]
+hql = "hql.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hql"]
