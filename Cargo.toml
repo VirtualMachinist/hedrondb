@@ -16,5 +16,9 @@ serde_yaml = "=0.9.34"
 uuid = { version = "=1.11.1", features = ["serde", "v4"] }
 
 [[bin]]
+name = "hedron"
+path = "src/bin/hedron.rs"
+
+[[bin]]
 name = "hedron-import"
 path = "src/bin/hedron-import.rs"
