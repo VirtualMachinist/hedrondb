@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{Error, Result};
-use crate::hql::row::{parse_extra_map, DesiredStateView, Row};
+use crate::hql::row::{parse_extra_map, DesiredStateView, HistoryEventView, Row};
+use crate::store::Store;
+use crate::types::Event;
+use uuid::Uuid;
 
 /// Mirrors hedron-core `Store` SCHEMA (CREATE TABLE columns / types).
 const EXPECTED_SCHEMA: &[(&str, &[(&str, &str)])] = &[
@@ -211,6 +214,15 @@ impl RoStore {
         Ok(latest)
     }
 
+    /// Cool path: `Store::causal_chain` event rows for one Desired State.
+    /// Drops `data`; does not return spec vs status.
+    pub fn causal_chain(&self, desired_state_id: &str) -> Result<Vec<HistoryEventView>> {
+        let id =
+            Uuid::parse_str(desired_state_id).map_err(|err| Error::Invalid(err.to_string()))?;
+        let events = Store::read_causal_chain(&self.conn, id)?;
+        Ok(events.iter().map(history_view).collect())
+    }
+
     pub fn vault_ids_named(&self, name: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -262,5 +274,30 @@ impl RoStore {
             out.insert(table, cols);
         }
         Ok(out)
+    }
+}
+
+fn history_view(event: &Event) -> HistoryEventView {
+    let caused_by = if event.caused_by.is_empty() {
+        None
+    } else {
+        Some(
+            event
+                .caused_by
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    };
+    HistoryEventView {
+        id: event.id.to_string(),
+        vault_id: event.vault_id.to_string(),
+        ts: event.ts,
+        actor: event.actor.to_string(),
+        event_type: event.event_type.clone(),
+        caused_by,
+        reconciles: event.reconciles.map(|id| id.to_string()),
+        supersedes: event.supersedes.clone(),
     }
 }

@@ -58,6 +58,13 @@ class Row:
         reconciled_by: Optional[str] = None,
         importance: Optional[float] = None,
         state_id: Optional[str] = None,
+        event_id: Optional[str] = None,
+        ts: Optional[int] = None,
+        actor: Optional[str] = None,
+        event_type: Optional[str] = None,
+        caused_by: Optional[str] = None,
+        reconciles: Optional[str] = None,
+        supersedes: Optional[str] = None,
         selected: Optional[dict[str, Any]] = None,
     ) -> None:
         self.path = path
@@ -79,6 +86,13 @@ class Row:
         self.reconciled_by = reconciled_by
         self.importance = importance
         self.state_id = state_id
+        self.event_id = event_id
+        self.ts = ts
+        self.actor = actor
+        self.event_type = event_type
+        self.caused_by = caused_by
+        self.reconciles = reconciles
+        self.supersedes = supersedes
         self._selected = selected
 
     def get(self, field: str) -> Any:
@@ -102,13 +116,27 @@ class Row:
         if field == "to.path":
             return self.to_path
         if field == "id":
+            if self.event_id is not None:
+                return self.event_id
             return self.state_id if self.state_id is not None else self.node_id
         if field == "vault_id":
             return self.vault_id
         if field == "node_type":
             return self.node_type
         if field == "type":
+            if self.event_type is not None:
+                return self.event_type
             return self.edge_type
+        if field == "ts":
+            return self.ts
+        if field == "actor":
+            return self.actor
+        if field == "caused_by":
+            return self.caused_by
+        if field == "reconciles":
+            return self.reconciles
+        if field == "supersedes":
+            return self.supersedes
         if field == "spec":
             return self.spec
         if field == "status":
@@ -145,6 +173,22 @@ class Row:
             state_id=ds.get("id"),
         )
 
+    @classmethod
+    def from_history(cls, event: dict[str, Any]) -> "Row":
+        """Cool chain row. No spec/status/data."""
+        row = cls(
+            vault_id=event.get("vault_id"),
+            event_id=event.get("id"),
+            ts=event.get("ts"),
+            actor=event.get("actor"),
+            event_type=event.get("event_type") or event.get("type"),
+            caused_by=event.get("caused_by"),
+            reconciles=event.get("reconciles"),
+            supersedes=event.get("supersedes"),
+        )
+        row._selected = {field: row._raw_get(field) for field in default_history_fields()}
+        return row
+
     def project(self, fields: list[str]) -> "Row":
         selected = {field: self._raw_get(field) for field in fields}
         return Row(
@@ -167,6 +211,13 @@ class Row:
             reconciled_by=self.reconciled_by,
             importance=self.importance,
             state_id=self.state_id,
+            event_id=self.event_id,
+            ts=self.ts,
+            actor=self.actor,
+            event_type=self.event_type,
+            caused_by=self.caused_by,
+            reconciles=self.reconciles,
+            supersedes=self.supersedes,
             selected=selected,
         )
 
@@ -190,3 +241,15 @@ class Row:
     def searchable_text(self) -> str:
         parts = [self.path or "", self.extra, self.to_raw or "", self.properties]
         return "\n".join(parts)
+
+
+def default_history_fields() -> list[str]:
+    return [
+        "id",
+        "ts",
+        "actor",
+        "type",
+        "caused_by",
+        "reconciles",
+        "supersedes",
+    ]

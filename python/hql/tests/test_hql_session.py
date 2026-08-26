@@ -67,6 +67,7 @@ DOC = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 DS_V1 = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 DS_V2 = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 EVENT = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+EVENT2 = "99999999-9999-9999-9999-999999999999"
 
 PIPE_SESSION = (
     "vault htec-leo | agent leo | state | "
@@ -113,6 +114,11 @@ def _build_session_db(path: Path) -> None:
         "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) "
         "VALUES (?, ?, 1, ?, 'Reconciled', 'hdt_must_not_print', '[]', ?, ?)",
         (EVENT, VAULT, AGENT, DS_V2, f"{DS_V1}@1"),
+    )
+    conn.execute(
+        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) "
+        "VALUES (?, ?, 2, ?, 'Reconciled', 'raw_event_payload', '[]', ?, ?)",
+        (EVENT2, VAULT, AGENT, DS_V2, f"{DS_V2}@2"),
     )
     conn.commit()
     conn.close()
@@ -201,6 +207,56 @@ class HqlSessionTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             run_pipeline(self.db, "agent leo | causal")
         self.assertIn("unknown operator", str(ctx.exception))
+
+    def test_history_shows_latest_and_superseded_versions(self) -> None:
+        state = run_pipeline(self.db, "vault htec-leo | agent leo | state")
+        self.assertEqual(len(state), 1)
+        self.assertEqual(state[0]["state_version"], 2)
+        self.assertEqual(state[0]["id"], DS_V2)
+
+        rows = run_pipeline(self.db, "vault htec-leo | agent leo | history")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["id"] for row in rows], [EVENT, EVENT2])
+        supersedes = [row["supersedes"] for row in rows]
+        self.assertTrue(any(DS_V1 in (value or "") for value in supersedes))
+        self.assertTrue(any(DS_V2 in (value or "") for value in supersedes))
+        self.assertTrue(all(row["reconciles"] == DS_V2 for row in rows))
+
+    def test_history_does_not_bleed_spec_status_or_payloads(self) -> None:
+        rows = run_pipeline(
+            self.db,
+            "vault htec-leo | agent leo | history | "
+            "select id, spec, status, state_version, data, reconciles, supersedes",
+        )
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertIsNone(row["spec"])
+            self.assertIsNone(row["status"])
+            self.assertIsNone(row["state_version"])
+            self.assertIsNone(row["data"])
+            blob = " ".join(str(value or "") for value in row.as_dict().values())
+            self.assertNotIn("hdt_", blob)
+            self.assertNotIn("raw_event_payload", blob)
+            self.assertNotIn("Pending", blob)
+            self.assertNotIn("conditions:", blob)
+
+    def test_fluent_matches_history_pipe(self) -> None:
+        rows = (
+            Query.open(self.db)
+            .vault("htec-leo")
+            .agent("leo")
+            .history()
+            .select("id", "ts", "reconciles", "supersedes")
+            .run()
+        )
+        piped = run_pipeline(
+            self.db,
+            "vault htec-leo | agent leo | history | select id, ts, reconciles, supersedes",
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["id"], piped[0]["id"])
+        self.assertEqual(rows[0]["ts"], piped[0]["ts"])
+        self.assertEqual(rows[1]["id"], piped[1]["id"])
 
     def test_cli_session_pipe(self) -> None:
         buf = io.StringIO()

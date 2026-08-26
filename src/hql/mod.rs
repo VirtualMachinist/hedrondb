@@ -9,7 +9,10 @@ use std::io::{self, Write};
 use std::path::Path;
 
 pub use expr::{parse_filter, Comparison, FilterExpr};
-pub use row::{default_output_fields, parse_extra_map, DesiredStateView, Row, Value};
+pub use row::{
+    default_history_fields, default_output_fields, parse_extra_map, DesiredStateView,
+    HistoryEventView, Row, Value,
+};
 pub use store::RoStore;
 
 use crate::error::{Error, Result};
@@ -30,8 +33,9 @@ Options:
                          Output format (default tsv)
   -h, --help             Print help
 
-Operators: vault, agent, state, search, traverse, filter, select, limit.
-`causal` is rejected. Default columns hide spec/status unless selected.
+Operators: vault, agent, state, history, search, traverse, filter, select, limit.
+`causal` is rejected. `state` is Warm (latest spec/status). `history` is Cool
+(causal_chain only). Default columns hide spec/status unless selected.
 
 Python `python/hql` is a result-twin of this command.
 ";
@@ -61,6 +65,7 @@ enum Op {
     Vault(String),
     Agent(String),
     State,
+    History,
     Search(String),
     Traverse { edge: String, hops: i64 },
     Filter(String),
@@ -93,6 +98,11 @@ impl Query {
 
     pub fn state(mut self) -> Self {
         self.ops.push(Op::State);
+        self
+    }
+
+    pub fn history(mut self) -> Self {
+        self.ops.push(Op::History);
         self
     }
 
@@ -172,6 +182,9 @@ impl Query {
                 Op::State => {
                     rows = apply_state(rows, &self.store.latest_desired_states()?);
                 }
+                Op::History => {
+                    rows = apply_history(rows, &self.store)?;
+                }
                 Op::Search(needle) => {
                     rows.retain(|row| search_hit(row, needle, &outgoing, &by_id));
                 }
@@ -215,6 +228,12 @@ impl Query {
                     return Err(Error::Invalid("state takes no arguments".into()));
                 }
                 self.ops.push(Op::State);
+            }
+            "history" => {
+                if !rest.is_empty() {
+                    return Err(Error::Invalid("history takes no arguments".into()));
+                }
+                self.ops.push(Op::History);
             }
             "search" => {
                 self.ops.push(Op::Search(unquote_arg(rest)));
@@ -453,6 +472,26 @@ fn apply_state(rows: Vec<Row>, latest: &HashMap<String, DesiredStateView>) -> Ve
         emitted.push(row.with_state(ds));
     }
     emitted
+}
+
+fn apply_history(rows: Vec<Row>, store: &RoStore) -> Result<Vec<Row>> {
+    let latest = store.latest_desired_states()?;
+    let mut emitted = Vec::new();
+    for row in rows {
+        if !matches!(row.node_type.as_deref(), Some("Agent") | Some("Vault")) {
+            continue;
+        }
+        let Some(vault_id) = row.vault_id.as_deref() else {
+            continue;
+        };
+        let Some(ds) = latest.get(vault_id) else {
+            continue;
+        };
+        for event in store.causal_chain(&ds.id)? {
+            emitted.push(Row::from_history(&event));
+        }
+    }
+    Ok(emitted)
 }
 
 fn apply_limit(rows: &mut Vec<Row>, n: i64) {

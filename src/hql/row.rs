@@ -138,6 +138,13 @@ pub struct Row {
     pub reconciled_by: Option<String>,
     pub importance: Option<f64>,
     pub state_id: Option<String>,
+    pub event_id: Option<String>,
+    pub ts: Option<i64>,
+    pub actor: Option<String>,
+    pub event_type: Option<String>,
+    pub caused_by: Option<String>,
+    pub reconciles: Option<String>,
+    pub supersedes: Option<String>,
     pub(crate) selected: Option<Vec<(String, Value)>>,
 }
 
@@ -163,6 +170,13 @@ impl Default for Row {
             reconciled_by: None,
             importance: None,
             state_id: None,
+            event_id: None,
+            ts: None,
+            actor: None,
+            event_type: None,
+            caused_by: None,
+            reconciles: None,
+            supersedes: None,
             selected: None,
         }
     }
@@ -201,7 +215,9 @@ impl Row {
             "from.path" => opt_str(&self.from_path),
             "to.path" => opt_str(&self.to_path),
             "id" => {
-                if let Some(id) = &self.state_id {
+                if let Some(id) = &self.event_id {
+                    Value::Str(id.clone())
+                } else if let Some(id) = &self.state_id {
                     Value::Str(id.clone())
                 } else {
                     opt_str(&self.node_id)
@@ -209,7 +225,21 @@ impl Row {
             }
             "vault_id" => opt_str(&self.vault_id),
             "node_type" => opt_str(&self.node_type),
-            "type" => opt_str(&self.edge_type),
+            "type" => {
+                if let Some(event_type) = &self.event_type {
+                    Value::Str(event_type.clone())
+                } else {
+                    opt_str(&self.edge_type)
+                }
+            }
+            "ts" => match self.ts {
+                Some(n) => Value::Int(n),
+                None => Value::Null,
+            },
+            "actor" => opt_str(&self.actor),
+            "caused_by" => opt_str(&self.caused_by),
+            "reconciles" => opt_str(&self.reconciles),
+            "supersedes" => opt_str(&self.supersedes),
             "spec" => opt_str(&self.spec),
             "status" => opt_str(&self.status),
             "state_version" => match self.state_version {
@@ -235,6 +265,27 @@ impl Row {
         row.importance = Some(ds.importance);
         row.state_id = Some(ds.id.clone());
         row.selected = None;
+        row
+    }
+
+    /// Cool chain row from `Store::causal_chain`. No spec/status/data.
+    pub fn from_history(event: &HistoryEventView) -> Row {
+        let mut row = Row {
+            vault_id: Some(event.vault_id.clone()),
+            event_id: Some(event.id.clone()),
+            ts: Some(event.ts),
+            actor: Some(event.actor.clone()),
+            event_type: Some(event.event_type.clone()),
+            caused_by: event.caused_by.clone(),
+            reconciles: event.reconciles.clone(),
+            supersedes: event.supersedes.clone(),
+            ..Row::default()
+        };
+        let selected = default_history_fields()
+            .iter()
+            .map(|field| ((*field).to_string(), row.raw_get(field)))
+            .collect();
+        row.selected = Some(selected);
         row
     }
 
@@ -281,6 +332,19 @@ pub fn default_output_fields() -> &'static [&'static str] {
     &["path", "from.path", "to.path", "to_id", "to_raw", "from_id"]
 }
 
+/// Cool-path default columns. Event metadata only; no spec/status/data.
+pub fn default_history_fields() -> &'static [&'static str] {
+    &[
+        "id",
+        "ts",
+        "actor",
+        "type",
+        "caused_by",
+        "reconciles",
+        "supersedes",
+    ]
+}
+
 fn opt_str(value: &Option<String>) -> Value {
     match value {
         Some(s) => Value::Str(s.clone()),
@@ -297,4 +361,17 @@ pub struct DesiredStateView {
     pub importance: f64,
     pub spec: String,
     pub status: String,
+}
+
+/// Cool-path event view. Drops `data` so tokens / payloads never reach HQL rows.
+#[derive(Clone, Debug)]
+pub struct HistoryEventView {
+    pub id: String,
+    pub vault_id: String,
+    pub ts: i64,
+    pub actor: String,
+    pub event_type: String,
+    pub caused_by: Option<String>,
+    pub reconciles: Option<String>,
+    pub supersedes: Option<String>,
 }
