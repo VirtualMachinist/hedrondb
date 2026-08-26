@@ -3,6 +3,10 @@
 Read-only pipe queries over a HedronDB store. stdlib `sqlite3` only — no pyo3,
 no writes, no migrations.
 
+This package is a **result-twin** of the product CLI `hedron hql`. The same
+pipeline string against the same db must produce the same rows (fields and
+values). See the crate README and `cargo test --test hql_twin`.
+
 Open the store as `file:...?mode=ro`. `schema_mismatches()` reports drift
 against the `hedron-core` `CREATE TABLE` for `nodes`, `edges`,
 `desired_states`, and `events`. It does not migrate.
