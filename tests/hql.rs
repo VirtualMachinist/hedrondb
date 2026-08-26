@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hedron_core::hql::{run_pipeline, Query, RoStore, Value};
+use hedron_core::{DesiredState, Node, Store};
 use rusqlite::Connection;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -75,6 +76,7 @@ const DOC: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 const DS_V1: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const DS_V2: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
 const EVENT: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+const EVENT2: &str = "99999999-9999-9999-9999-999999999999";
 
 const PIPE_SESSION: &str =
     "vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status";
@@ -203,6 +205,12 @@ fn build_session_db(path: &std::path::Path) {
         "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) \
          VALUES (?1, ?2, 1, ?3, 'Reconciled', 'hdt_must_not_print', '[]', ?4, ?5)",
         rusqlite::params![EVENT, VAULT_SESSION, AGENT, DS_V2, format!("{DS_V1}@1")],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) \
+         VALUES (?1, ?2, 2, ?3, 'Reconciled', 'raw_event_payload', '[]', ?4, ?5)",
+        rusqlite::params![EVENT2, VAULT_SESSION, AGENT, DS_V2, format!("{DS_V2}@2")],
     )
     .unwrap();
 }
@@ -466,6 +474,139 @@ fn causal_operator_is_out_of_scope() {
     build_session_db(&db.path);
     let err = run_pipeline(&db.path, "agent leo | causal").unwrap_err();
     assert!(err.to_string().contains("unknown operator"));
+}
+
+#[test]
+fn history_shows_latest_and_superseded_versions() {
+    let db = TempDb::new("session-history");
+    build_session_db(&db.path);
+    let state = run_pipeline(&db.path, "vault htec-leo | agent leo | state").unwrap();
+    assert_eq!(state.len(), 1);
+    assert_eq!(state[0].get("state_version"), Value::Int(2));
+    assert_eq!(s(&state[0], "id").as_deref(), Some(DS_V2));
+
+    let rows = run_pipeline(&db.path, "vault htec-leo | agent leo | history").unwrap();
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|row| s(row, "id").unwrap_or_default())
+        .collect();
+    assert_eq!(ids, vec![EVENT.to_string(), EVENT2.to_string()]);
+    let supersedes: Vec<String> = rows
+        .iter()
+        .map(|row| s(row, "supersedes").unwrap_or_default())
+        .collect();
+    assert!(supersedes.iter().any(|v| v.contains(DS_V1)));
+    assert!(supersedes.iter().any(|v| v.contains(DS_V2)));
+    assert!(rows
+        .iter()
+        .all(|row| s(row, "reconciles").as_deref() == Some(DS_V2)));
+}
+
+#[test]
+fn history_does_not_bleed_spec_status_or_payloads() {
+    let db = TempDb::new("session-history-hygiene");
+    build_session_db(&db.path);
+    let rows = run_pipeline(
+        &db.path,
+        "vault htec-leo | agent leo | history | select id, spec, status, state_version, data, reconciles, supersedes",
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.get("spec"), Value::Null);
+        assert_eq!(row.get("status"), Value::Null);
+        assert_eq!(row.get("state_version"), Value::Null);
+        assert_eq!(row.get("data"), Value::Null);
+        let blob = row
+            .as_dict(None)
+            .into_iter()
+            .map(|(_, v)| v.to_display())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!blob.contains("hdt_"));
+        assert!(!blob.contains("raw_event_payload"));
+        assert!(!blob.contains("Pending"));
+        assert!(!blob.contains("Reconciled\n") && !blob.contains("conditions:"));
+    }
+}
+
+#[test]
+fn fluent_matches_history_pipe() {
+    let db = TempDb::new("session-history-fluent");
+    build_session_db(&db.path);
+    let rows = Query::open(&db.path)
+        .unwrap()
+        .vault("htec-leo")
+        .agent("leo")
+        .history()
+        .select(["id", "ts", "reconciles", "supersedes"])
+        .run()
+        .unwrap();
+    let piped = run_pipeline(
+        &db.path,
+        "vault htec-leo | agent leo | history | select id, ts, reconciles, supersedes",
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(s(&rows[0], "id"), s(&piped[0], "id"));
+    assert_eq!(rows[0].get("ts"), piped[0].get("ts"));
+    assert_eq!(s(&rows[1], "id"), s(&piped[1], "id"));
+}
+
+#[test]
+fn history_matches_store_causal_chain_on_elio() {
+    let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("hedron-hql-elio-{}-{}.db", std::process::id(), n));
+    let _ = std::fs::remove_file(&path);
+    let mut store = Store::open(&path).unwrap();
+    let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap();
+    let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
+    let doc = Node::brief_document(boot.vault.id, "eli", "2026-08-25").unwrap();
+    store.put_node(&boot.token, doc).unwrap();
+    let (_, ev1) = store.reconcile(&boot.token, ds.id).unwrap();
+    let (_, ev2) = store.reconcile(&boot.token, ds.id).unwrap();
+    let chain = store.causal_chain(&boot.token, ds.id).unwrap();
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].id, ev1.id);
+    assert_eq!(chain[1].id, ev2.id);
+
+    let state = run_pipeline(&path, "vault htec-elio | agent elio | state").unwrap();
+    assert_eq!(state.len(), 1);
+    assert_eq!(state[0].get("state_version"), Value::Int(3));
+
+    let history = run_pipeline(&path, "vault htec-elio | agent elio | history").unwrap();
+    assert_eq!(history.len(), 2);
+    let ev1_id = ev1.id.to_string();
+    let ev2_id = ev2.id.to_string();
+    let prev1 = format!("{}@1", ds.id);
+    let prev2 = format!("{}@2", ds.id);
+    assert_eq!(s(&history[0], "id").as_deref(), Some(ev1_id.as_str()));
+    assert_eq!(s(&history[1], "id").as_deref(), Some(ev2_id.as_str()));
+    assert_eq!(
+        s(&history[0], "supersedes").as_deref(),
+        Some(prev1.as_str())
+    );
+    assert_eq!(
+        s(&history[1], "supersedes").as_deref(),
+        Some(prev2.as_str())
+    );
+    for row in &history {
+        assert_eq!(row.get("spec"), Value::Null);
+        assert_eq!(row.get("status"), Value::Null);
+        let blob = row
+            .as_dict(None)
+            .into_iter()
+            .map(|(_, v)| v.to_display())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!blob.contains("hdt_"));
+        assert!(!blob.contains("present"));
+        assert!(!blob.contains("missing"));
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

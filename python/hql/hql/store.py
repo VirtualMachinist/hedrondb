@@ -155,6 +155,29 @@ class Store:
             }
         return latest
 
+    def causal_chain(self, desired_state_id: str) -> list[dict]:
+        """Cool path: events that reconcile this Desired State. No spec/status/data."""
+        rows = self.conn.execute(
+            "SELECT id, vault_id, ts, actor, type, caused_by, reconciles, supersedes "
+            "FROM events "
+            "WHERE reconciles = ? "
+            "ORDER BY ts ASC, id ASC",
+            (desired_state_id,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "vault_id": row["vault_id"],
+                "ts": int(row["ts"]),
+                "actor": row["actor"],
+                "type": row["type"],
+                "caused_by": _format_caused_by(row["caused_by"]),
+                "reconciles": row["reconciles"],
+                "supersedes": row["supersedes"],
+            }
+            for row in rows
+        ]
+
     def vault_ids_named(self, name: str) -> list[str]:
         ids: list[str] = []
         for row in self.conn.execute(
@@ -183,3 +206,23 @@ class Store:
 
     def close(self) -> None:
         self.conn.close()
+
+
+def _format_caused_by(raw: Optional[str]) -> Optional[str]:
+    text = (raw or "").strip()
+    if not text or text in ("[]", "null", "~"):
+        return None
+    ids: list[str] = []
+    for line in text.splitlines():
+        line = line.strip().strip(",")
+        if line.startswith("- "):
+            ids.append(line[2:].strip().strip("'").strip('"'))
+        elif line.startswith("[") and line.endswith("]"):
+            inner = line[1:-1].strip()
+            if inner:
+                ids.extend(
+                    part.strip().strip("'").strip('"')
+                    for part in inner.split(",")
+                    if part.strip()
+                )
+    return ",".join(ids) if ids else None
