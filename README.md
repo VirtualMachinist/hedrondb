@@ -1,5 +1,7 @@
 # HedronDB
 
+[![CI](https://github.com/Hedronite/hedrondb/actions/workflows/ci.yml/badge.svg)](https://github.com/Hedronite/hedrondb/actions/workflows/ci.yml)
+
 Local-first knowledge OS for AI agents.
 
 Working remotes: **GitHub [Hedronite/hedrondb](https://github.com/Hedronite/hedrondb)** (working) and **GitHedron Hedronite/hedrondb** (mesh SoT).
@@ -25,6 +27,8 @@ hedron hql --db FILE [--format tsv|table|json] 'vault … | …'
 cargo test
 cd python/hql && python3 -m unittest discover -s tests -v
 ```
+
+Every push is checked on GitHub Actions (`ubuntu-latest`, rustc 1.83): the same tests, plus `cargo build --release` for `hedron` (and the `hedron-import` alias).
 
 ## Phase 0 kernel
 
