@@ -311,8 +311,16 @@ impl Store {
         let session = self.auth(token)?;
         let vault_id = self.desired_state_vault(desired_state_id)?;
         self.ensure_access(session, vault_id)?;
+        Self::read_causal_chain(&self.conn, desired_state_id)
+    }
 
-        let mut stmt = self.conn.prepare(
+    /// Event-row reader shared by `causal_chain` and HQL `history`.
+    /// Does not return spec vs status. Graph edges are a projection; this reads events.
+    pub(crate) fn read_causal_chain(
+        conn: &Connection,
+        desired_state_id: Uuid,
+    ) -> Result<Vec<Event>> {
+        let mut stmt = conn.prepare(
             "SELECT id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes
              FROM events
              WHERE reconciles = ?1

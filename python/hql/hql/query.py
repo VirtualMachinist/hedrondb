@@ -1,4 +1,4 @@
-"""HQL v0 pipeline: vault | agent | state | search | traverse | filter | select | limit."""
+"""HQL v0 pipeline: vault | agent | state | history | search | traverse | filter | select | limit."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ class Query:
 
     def state(self) -> "Query":
         self._ops.append(("state",))
+        return self
+
+    def history(self) -> "Query":
+        self._ops.append(("history",))
         return self
 
     def search(self, text: str) -> "Query":
@@ -76,6 +80,8 @@ class Query:
                 rows = _filter_agents(rows, op[1])
             elif kind == "state":
                 rows = _apply_state(rows, self._store.latest_desired_states())
+            elif kind == "history":
+                rows = _apply_history(rows, self._store)
             elif kind == "search":
                 needle = op[1]
                 rows = [row for row in rows if _search_hit(row, needle, outgoing, by_id)]
@@ -108,6 +114,10 @@ class Query:
             if rest:
                 raise ValueError("state takes no arguments")
             self.state()
+        elif name == "history":
+            if rest:
+                raise ValueError("history takes no arguments")
+            self.history()
         elif name == "search":
             self.search(_unquote_arg(rest))
         elif name == "traverse":
@@ -277,6 +287,21 @@ def _apply_state(rows: list[Row], latest: dict[str, dict]) -> list[Row]:
         if ds is None:
             continue
         emitted.append(row.with_state(ds))
+    return emitted
+
+
+def _apply_history(rows: list[Row], store: Store) -> list[Row]:
+    """Cool only: causal_chain for the latest Desired State. No spec/status/data."""
+    latest = store.latest_desired_states()
+    emitted: list[Row] = []
+    for row in rows:
+        if row.node_type not in ("Agent", "Vault"):
+            continue
+        ds = latest.get(row.vault_id or "")
+        if ds is None:
+            continue
+        for event in store.causal_chain(ds["id"]):
+            emitted.append(Row.from_history(event))
     return emitted
 
 
