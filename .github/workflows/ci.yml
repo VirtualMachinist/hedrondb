@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rust-version = "1.83" in Cargo.toml; do not bump blake3/uuid/indexmap.
+      - name: rustc 1.83
+        uses: dtolnay/rust-toolchain@1.83.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Includes hql_twin plus phase0 / cli / hql / import.
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Check hedron binaries
+        run: test -x target/release/hedron && test -x target/release/hedron-import
+
+      # stdlib unittest; same command as python/hql/README.md.
+      - name: Python HQL twin
+        working-directory: python/hql
+        run: python3 -m unittest discover -s tests -v
