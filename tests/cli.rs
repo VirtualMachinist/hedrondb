@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use hedron_core::{DesiredState, Node, Store};
+
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct TempTree {
@@ -105,4 +107,42 @@ fn hedron_import_subcommand_matches_alias() {
     assert!(stdout.contains("documents: 1"));
     assert!(stdout.contains("mentions_dangling: 1"));
     assert!(stdout.contains("mode: 0600"));
+}
+
+#[test]
+fn hedron_hql_quoted_history_pipeline() {
+    let out_dir = TempTree::new("history-db");
+    let db = out_dir.path.join("elio.db");
+    let mut store = Store::open(&db).unwrap();
+    let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap();
+    let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
+    let doc = Node::brief_document(boot.vault.id, "eli", "2026-08-25").unwrap();
+    store.put_node(&boot.token, doc).unwrap();
+    let (_, event) = store.reconcile(&boot.token, ds.id).unwrap();
+    drop(store);
+
+    let result = hedron()
+        .args([
+            "hql",
+            "--db",
+            db.to_str().unwrap(),
+            "--format",
+            "json",
+            "vault htec-elio | agent elio | history",
+        ])
+        .output()
+        .expect("hedron hql history");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "hedron hql history failed: {stderr}{stdout}"
+    );
+    assert!(stdout.contains(&event.id.to_string()));
+    assert!(stdout.contains(&format!("{}@1", ds.id)));
+    assert!(stdout.contains("Reconciled"));
+    assert!(!stdout.contains("hdt_") && !stderr.contains("hdt_"));
+    assert!(!stdout.contains("spec"));
+    assert!(!stdout.contains("status"));
 }

@@ -15,7 +15,7 @@ hedron hql --db FILE [--format tsv|table|json] 'vault … | …'
 ```
 
 - **`hedron import`** — markdown tree loader (same behavior as the original `hedron-import` flags).
-- **`hedron hql`** — HQL v0 read-only pipes on `hedron-core` / rusqlite. Opens the store read-only. Never writes. Quote the pipeline so the shell is not the parser.
+- **`hedron hql`** — HQL v0 read-only pipes on `hedron-core` / rusqlite. Opens the store read-only. Never writes. Quote the pipeline so the shell is not the parser. `state` is Warm (latest spec/status). `history` is Cool (`Store::causal_chain` only).
 
 **`hedron-import` is kept as a thin alias** of `hedron import` (same flags, same output). Prefer `hedron import`.
 
@@ -34,7 +34,7 @@ Phase 0 lives in the `hedron-core` crate. Tests are the surface. It proves:
 - **Causal Event Log** — append-only rows with `caused_by`, `reconciles`, `supersedes` on the event first.
 - **Two query paths** — `current_state` (Warm: what is true now) and `causal_chain` (Cool: supersession / causal history). They are separate APIs and must not be mixed.
 
-The first recon loop is **Option B (docs / EOD count)**. Storage is one SQLite file (`rusqlite` only) with four tables: `nodes`, `edges`, `desired_states`, `events`. Vaults are isolated named containers. An agent token is required for mutating and querying calls; tokens live in process memory and are rotated at the library gate. `hedron hql` is a separate read-only path: it does not take a token and does not read the event log.
+The first recon loop is **Option B (docs / EOD count)**. Storage is one SQLite file (`rusqlite` only) with four tables: `nodes`, `edges`, `desired_states`, `events`. Vaults are isolated named containers. An agent token is required for mutating and querying calls; tokens live in process memory and are rotated at the library gate. `hedron hql` is a separate read-only path: it does not take a token. `state` stays off the event log; `history` hangs off `Store::causal_chain`.
 
 Store files must be mode **0600**. Do not put tokens or other secrets in YAML / frontmatter. H.TEC is a `path` string on an Agent node, not a filesystem tree.
 
@@ -50,9 +50,9 @@ cd python/hql
 python3 -m hql --db FILE [--format tsv|table|json] PIPELINE
 ```
 
-Fluent (Rust or Python): `Query::open(db).vault(...).search(...).filter(...).select(...).limit(...).run()`.
+Fluent (Rust or Python): `Query::open(db).vault(...).agent(...).state()` or `.history()`, then `search` / `filter` / `select` / `limit` / `run()`.
 
-Operators: `vault`, `agent`, `state`, `search`, `traverse --edge/--hops`, `filter`, `select`, `limit`. `causal` is rejected. Default table columns hide `spec`/`status` unless selected. `state` attaches the latest `desired_states` row per `vault_id` onto Agent or Vault rows only. `agent` matches `extra.name` / `extra.title` / path basename (exact, else substring) and stays in the current vault slice.
+Operators: `vault`, `agent`, `state`, `history`, `search`, `traverse --edge/--hops`, `filter`, `select`, `limit`. `causal` is rejected (no alias). Default table columns hide `spec`/`status` unless selected. `state` attaches the latest `desired_states` row per `vault_id` onto Agent or Vault rows only. `history` replaces those rows with `causal_chain` event metadata for that latest Desired State (no spec/status/data). `agent` matches `extra.name` / `extra.title` / path basename (exact, else substring) and stays in the current vault slice.
 
 Three pipes that already ran on citadel (2026-08-25), plus the Warm session pipe:
 
@@ -61,6 +61,7 @@ vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | se
 vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
 vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path
 vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
+vault htec-elio | agent elio | history
 ```
 
 Notes without `extra.domain` stay without it. A domain filter drops those rows; it does not infer or backfill.

@@ -67,6 +67,9 @@ const PIPE_SESSION: &str =
 const PIPE_AGENT_STATE: &str = "agent leo | state | select path, extra.title, state_version, status, id, reconciled_by, importance";
 const PIPE_NO_EVENTS: &str =
     "vault htec-leo | agent leo | state | select path, spec, status, state_version, id";
+const PIPE_HISTORY: &str = "vault htec-leo | agent leo | history";
+const PIPE_HISTORY_SELECT: &str =
+    "vault htec-leo | agent leo | history | select id, ts, actor, type, caused_by, reconciles, supersedes, spec, status";
 
 struct TempDb {
     path: PathBuf,
@@ -196,6 +199,13 @@ fn build_session_db(path: &Path) {
         [vault, agent],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) \
+         VALUES ('99999999-9999-9999-9999-999999999999', ?1, 2, ?2, 'Reconciled', 'raw_event_payload', '[]', \
+         'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee@2')",
+        [vault, agent],
+    )
+    .unwrap();
 }
 
 fn run_hedron_hql(db: &Path, pipeline: &str) -> String {
@@ -299,7 +309,13 @@ fn rust_and_python_agree_on_citadel_pipes() {
 fn rust_and_python_agree_on_session_pipes() {
     let db = TempDb::new("session");
     build_session_db(&db.path);
-    for pipeline in [PIPE_SESSION, PIPE_AGENT_STATE, PIPE_NO_EVENTS] {
+    for pipeline in [
+        PIPE_SESSION,
+        PIPE_AGENT_STATE,
+        PIPE_NO_EVENTS,
+        PIPE_HISTORY,
+        PIPE_HISTORY_SELECT,
+    ] {
         assert_twins(&db.path, pipeline);
     }
 }
