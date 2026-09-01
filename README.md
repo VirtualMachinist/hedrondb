@@ -44,6 +44,18 @@ Store files must be mode **0600**. Do not put tokens or other secrets in YAML / 
 
 The crate is sync-only. No tokio, pyo3, HTTP, or new TCP.
 
+## Option B recon (docs / EOD count)
+
+The first recon loop is **Option B**: `Store::reconcile` plus the `current_state` Warm path (what is true now) versus the `causal_chain` Cool path (supersession / causal history). The two paths are separate APIs and must not be mixed. This slice is docs / EOD count only — no crate logic, no `hedron recon` subcommand (there is none), and no Atrium / H.TEC fixtures folded into the count.
+
+Live citadel store (quoted, not invented): `~/Projects/hedrondb-data/eod-2026-08-25.db` (mode **0600**):
+
+- **8 nodes** — 1 Vault `hedron`, 1 Agent `eli`, 6 Document `briefs/2026-08-25/{eli,marci,jupi,merci,vini,lea}`.
+- **8 edges** — 6 `caused_by`, 1 `reconciles`, 1 `supersedes`.
+- **Desired State** `961310a5-71d3-4a82-9d50-5decf430a824` (`961310a5`) v2, status **Reconciled**; spec `required_briefs` = `eli, marci, jupi, merci, vini, lea`; observed `present` = all six; `missing: []`.
+
+The Atrium and H.TEC fixture stores (`fixture-atrium-*`, `fixture-htec-*`) are separate dbs and are **not** counted here.
+
 ## Query surface
 
 `hedron hql` is the product HQL. `python/hql` is the stdlib `sqlite3` twin (`file:...?mode=ro`, never writes). Schema drift is reported, not migrated.
