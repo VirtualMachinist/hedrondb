@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.83"
 description = "HedronDB Phase 0: desired state, causal event log, vault isolation"
 publish = false
+default-run = "hedron"
 
 [dependencies]
 # Exact pins keep the crate on rustc 1.83; newer blake3/uuid/indexmap need 1.85.

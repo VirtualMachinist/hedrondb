@@ -1,0 +1,38 @@
+name: Nightly
+
+on:
+  schedule:
+    # 05:00 UTC daily. schedule-only; do not pile onto ci.yml.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  install-check:
+    name: cargo install check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same rustc 1.83 pin as ci.yml; do not bump blake3/uuid/indexmap.
+      - name: rustc 1.83
+        uses: dtolnay/rust-toolchain@1.83.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Install into an isolated prefix under RUNNER_TEMP; do not pollute $HOME.
+      - name: cargo install --path . --locked --bin hedron
+        run: |
+          cargo install --path . --locked --bin hedron --root "$RUNNER_TEMP/hedron-prefix"
+
+      - name: Installed binary exists
+        run: test -x "$RUNNER_TEMP/hedron-prefix/bin/hedron"
+
+      # No-store smoke: --help reads no db, opens no TCP port.
+      - name: Smoke (hedron --help)
+        run: |
+          "$RUNNER_TEMP/hedron-prefix/bin/hedron" --help
