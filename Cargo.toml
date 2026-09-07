@@ -10,7 +10,10 @@ default-run = "hedron"
 [dependencies]
 # Exact pins keep the crate on rustc 1.83; newer blake3/uuid/indexmap need 1.85.
 blake3 = "=1.8.2"
-indexmap = { version = "=2.7.1", features = ["std"] }
+# `indexmap` loosened to `^2` for the same reason as `serde`/`uuid` (Facet's
+# workspace pulls indexmap 2.14.x via serde_yaml_ng; the exact `=2.7.1`
+# blocked unification).
+indexmap = { version = "^2", features = ["std"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 # `serde` is loosened to `^1` so a downstream workspace that pins a newer
 # 1.0.x (e.g. Facet at 1.0.229) can unify on it. The exact `=1.0.217` pin
