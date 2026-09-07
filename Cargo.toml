@@ -12,7 +12,13 @@ default-run = "hedron"
 blake3 = "=1.8.2"
 indexmap = { version = "=2.7.1", features = ["std"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
-serde = { version = "=1.0.217", features = ["derive"] }
+# `serde` is loosened to `^1` so a downstream workspace that pins a newer
+# 1.0.x (e.g. Facet at 1.0.229) can unify on it. The exact `=1.0.217` pin
+# blocked coinstall (cargo could not unify 1.0.217 with ^1.0.229). serde is
+# stable across 1.0.x; this branch (`facet-pin-align`) is a proposal for the
+# Facet integration and is NOT merged into hedrondb main — the rustc 1.83 MSRV
+# policy decision is the hedrondb maintainers' / Marci's slice.
+serde = { version = "^1", features = ["derive"] }
 serde_yaml = "=0.9.34"
 uuid = { version = "=1.11.1", features = ["serde", "v4"] }
 
