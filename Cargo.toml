@@ -14,7 +14,16 @@ blake3 = "=1.8.2"
 # workspace pulls indexmap 2.14.x via serde_yaml_ng; the exact `=2.7.1`
 # blocked unification).
 indexmap = { version = "^2", features = ["std"] }
-rusqlite = { version = "=0.32.1", features = ["bundled"] }
+# `rusqlite` bumped to 0.40 (from =0.32.1) for Facet coinstall: rusqlite 0.32
+# and 0.40 both `links = "sqlite3"` (libsqlite3-sys), and cargo forbids two
+# packages linking the same native lib — so the two versions cannot coexist
+# in one resolution graph. Aligning to 0.40 (Facet's version) makes both use
+# one libsqlite3-sys and lets them coexist. The basic CRUD API hedron-core uses
+# (params!, Connection, Row::get, prepare, query_map, OptionalExtension) is
+# stable across 0.32→0.40. This is a PROPOSAL branch (facet-pin-align); the
+# rustc 1.83 MSRV impact (rusqlite 0.40 may need a newer rustc) is the
+# hedrondb maintainers' / Marci's decision.
+rusqlite = { version = "0.40", features = ["bundled"] }
 # `serde` is loosened to `^1` so a downstream workspace that pins a newer
 # 1.0.x (e.g. Facet at 1.0.229) can unify on it. The exact `=1.0.217` pin
 # blocked coinstall (cargo could not unify 1.0.217 with ^1.0.229). serde is
