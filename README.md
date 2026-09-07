@@ -30,6 +30,24 @@ cd python/hql && python3 -m unittest discover -s tests -v
 
 Every push is checked on GitHub Actions (`ubuntu-latest`, rustc 1.83): the same tests, plus `cargo build --release` for `hedron` (and the `hedron-import` alias).
 
+## Grade commands
+
+The exact commands that grade this crate. Run them from the crate root.
+
+```bash
+cargo test
+cargo test --test hql_twin
+cargo build --release && test -x target/release/hedron && test -x target/release/hedron-import
+cargo install --path . --locked --bin hedron
+```
+
+- `cargo test` — the full Rust suite (phase0 / cli / hql / import) plus `tests/hql_twin.rs`.
+- `cargo test --test hql_twin` — the Rust-vs-Python result-twin on the fixture pipes (`json.loads` equality).
+- `cargo build --release && test -x ...` — release build, then prove both binaries exist.
+- `cargo install --path . --locked --bin hedron` — the install check: `hedron` installs from the crate root into a prefix using the locked `Cargo.lock`. `hedron-import` is still built by `cargo build --release` and CI; it is not dropped.
+
+The **nightly** workflow (`.github/workflows/nightly.yml`, schedule-only) is the install check, not a second product. It runs `cargo install --path . --locked --bin hedron --root "$RUNNER_TEMP/hedron-prefix"`, `test -x` the installed `bin/hedron`, then a no-store `hedron --help` smoke. It opens no TCP port and adds no schedule onto `ci.yml`.
+
 ## Phase 0 kernel
 
 Phase 0 lives in the `hedron-core` crate. Tests are the surface. It proves:
