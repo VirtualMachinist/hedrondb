@@ -1,6 +1,8 @@
 # HQL v0
 
-Read-only pipes over a HedronDB store. The product CLI is `hedron hql`. `python/hql` is a stdlib `sqlite3` twin (`file:...?mode=ro`, never writes). The same pipeline against the same database must produce the same rows.
+Read-only pipes over a HedronDB store. Humans and agents use the **same** pipeline string. Humans usually want a table; agents want `--format json`. HQL never writes — mutations go through the Store API.
+
+The product CLI is `hedron hql`. `python/hql` is a stdlib `sqlite3` twin (`file:...?mode=ro`, never writes). The same pipeline against the same database must produce the same rows.
 
 ```bash
 hedron hql --db FILE [--format tsv|table|json] 'vault my-vault | search "HedronDB"'
