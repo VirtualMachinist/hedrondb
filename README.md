@@ -23,6 +23,7 @@
   <a href="#what-it-is">What it is</a> ·
   <a href="#hql-for-humans-and-agents">HQL</a> ·
   <a href="#hedron-db-and-facet">HedronDB and Facet</a> ·
+  <a href="#a-real-run">A real run</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#status">Status</a> ·
   <a href="#contributing">Contributing</a>
@@ -104,25 +105,72 @@ Operators: `vault`, `agent`, `state`, `history`, `search`, `traverse`, `filter`,
 
 ## HedronDB and Facet
 
-Two local products, two questions.
+Facet and HedronDB answer different questions. Facet: what did we call, and what came back? (YAML collections + Lattice runs.) HedronDB: what did we mean to be true, and how did that change? (desired state + causal log.) They meet in a session via IDs (actor, run, vault, event), not a shared table.
 
 | | [Facet](https://github.com/VirtualMachinist/facet) | HedronDB |
 |---|---|---|
 | Question | What did we call, and what came back? | What did we mean to be true, and how did that change? |
 | Canonical files | OpenCollection YAML (Git) | One SQLite intent file |
-| History | **Lattice** — runs, bodies, sessions (SQLite or Rust Turso) | **Causal log** — desired state vs observed, supersession |
-| Query | `facet history`, SQL over runs | `hedron hql` pipes |
+| History | **Lattice** — runs, bodies, sessions | **Causal log** — desired vs observed, supersession |
+| Query | `facet history` (SQL over runs) | `hedron hql` pipes |
 | Binary | `facet` | `hedron` |
 
-They meet in a session, not in a table. An operator (or an agent) uses Facet to run an authenticated request and keep the evidence. The same session can declare or reconcile intent in HedronDB, then read it back with HQL. Lineage is explicit IDs (actor, session, run, vault, event) — Facet’s Lattice is never HedronDB’s registry, and HedronDB is never the API collection.
-
-Typical loop:
-
-1. **Facet** runs the request; Lattice records the call.
-2. **HedronDB** records the intent (desired vs observed) and reconciles.
-3. **HQL** reads state or history — human as a table, agent as JSON.
-
 Neither product embeds the other. Wire them with a small CLI or MCP tool, scoped to a file and vault.
+
+## A real run
+
+You want two replicas of `web` Ready. Facet does the HTTP. HedronDB holds the intent. HQL is how you (or an agent) look.
+
+**1. Call the cluster — Facet records what came back.**
+
+```bash
+facet request run ./api/workloads/scale-web.yml --environment prod --json
+# Lattice now has the run: status, URL, body hash, session id
+facet history --sql "SELECT status, url FROM runs ORDER BY started_at DESC LIMIT 1"
+```
+
+**2. Ask HedronDB what we meant — same pipe for a human and an agent.**
+
+Human (table):
+
+```bash
+hedron hql --db ./intent.db \
+  'vault prod | agent deploy | state | select path, extra.title, state_version, status'
+```
+
+```text
+path          extra.title  state_version  status
+agents/deploy deploy       2              Reconciled
+```
+
+Agent (JSON — identical rows):
+
+```bash
+hedron hql --db ./intent.db --format json \
+  'vault prod | agent deploy | state | select path, extra.title, state_version, status'
+```
+
+```json
+[
+  {
+    "path": "agents/deploy",
+    "extra.title": "deploy",
+    "state_version": 2,
+    "status": "Reconciled"
+  }
+]
+```
+
+`state` is **now** (latest desired vs observed). Version 2 is Reconciled: the cluster matches the spec. An agent parses the JSON; a person reads the table. HQL did not write anything.
+
+**3. If it wasn’t Reconciled — look at how we got here.**
+
+```bash
+hedron hql --db ./intent.db --format json \
+  'vault prod | agent deploy | history | select id, ts, reconciles, supersedes'
+```
+
+`history` is **how it changed** (causal chain only — no spec payload). Facet’s Lattice still has the HTTP evidence for the same session; HedronDB still has the intent. You join them by IDs, not by dumping both into one database.
 
 ## How it works
 
