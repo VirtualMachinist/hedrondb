@@ -1,115 +1,136 @@
-# HedronDB
+<p align="center">
+  <a href="https://github.com/VirtualMachinist/hedrondb">
+    <img src="assets/hedrondb-logo.jpeg" alt="HedronDB" width="180">
+  </a>
+</p>
 
-[![CI](https://github.com/Hedronite/hedrondb/actions/workflows/ci.yml/badge.svg)](https://github.com/Hedronite/hedrondb/actions/workflows/ci.yml)
+<h1 align="center">HedronDB</h1>
 
-Local-first knowledge OS for AI agents.
+<p align="center">
+  <strong>Local-first intent store for agents.</strong><br>
+  Desired state, a causal event log, and a read-only query language — one SQLite file.
+</p>
 
-Working remotes: **GitHub [Hedronite/hedrondb](https://github.com/Hedronite/hedrondb)** (working) and **GitHedron Hedronite/hedrondb** (mesh SoT).
+<p align="center">
+  <a href="https://github.com/VirtualMachinist/hedrondb/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/VirtualMachinist/hedrondb/ci.yml?branch=main&style=flat&colorA=1A1A1A&colorB=2A7A84&label=ci" alt="CI"></a>
+  <a href="https://github.com/VirtualMachinist/hedrondb"><img src="https://img.shields.io/badge/HedronDB-v0.1.0-C9A227?style=flat&colorA=1A1A1A" alt="HedronDB v0.1.0"></a>
+  <a href="https://rustup.rs"><img src="https://img.shields.io/badge/Rust-1.83-F46623?style=flat&colorA=1A1A1A&logo=rust&logoColor=white" alt="Rust 1.83"></a>
+  <a href="https://hedronite.com"><img src="https://img.shields.io/badge/Hedronite-hedronite.com-C9A227?style=flat&colorA=1A1A1A" alt="Hedronite"></a>
+</p>
 
-## Product CLI (`hedron`)
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-it-is">What it is</a> ·
+  <a href="#what-you-get">What you get</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#status">Status</a> ·
+  <a href="#contributing">Contributing</a>
+</p>
 
-The product surface is one binary: **`hedron`**. It folds already-shipped Phase 0 capabilities; it is not a new product.
+<p align="center">
+  Built by <a href="https://hedronite.com">Hedronite</a>'s <a href="https://github.com/VirtualMachinist">VirtualMachinist</a>.
+  <em>The HedronDB mark is the teal crystal with a gold cap.</em>
+</p>
+
+---
+
+HedronDB is a local-first knowledge store for software agents. It records **what should be true** (desired state) and **what happened** (an append-only causal log), then lets you query both without a hosted control plane.
+
+One binary, `hedron`. One file, SQLite. Mutations go through an in-process store with vault isolation and short-lived tokens. Reads can go through **HQL**, a small pipe language that never writes.
+
+It is for people who want intent and reconciliation next to the agent, not in a remote database. Facet's Lattice (run history) is a different store; HedronDB does not replace it.
+
+**0.1.0** · `hedron` CLI · HQL v0 · rusqlite
+
+## Quick start
+
+**1. Build.**
 
 ```bash
-cargo build --bins
-hedron import --src DIR --db FILE --vault NAME --agent NAME
-hedron hql --db FILE [--format tsv|table|json] 'vault … | …'
+cargo build --release --bins
+export PATH="$PWD/target/release:$PATH"
 ```
 
-- **`hedron import`** — markdown tree loader (same behavior as the original `hedron-import` flags).
-- **`hedron hql`** — HQL v0 read-only pipes on `hedron-core` / rusqlite. Opens the store read-only. Never writes. Quote the pipeline so the shell is not the parser. `state` is Warm (latest spec/status). `history` is Cool (`Store::causal_chain` only).
-
-**`hedron-import` is kept as a thin alias** of `hedron import` (same flags, same output). Prefer `hedron import`.
-
-**`python/hql` stays in-tree as a result-twin.** The same pipeline string against the same db must produce the same rows (fields and values). `cargo test --test hql_twin` is the documented comparison: it runs `hedron hql --format json` and `python3 -m hql --format json` on the fixture pipes and checks `json.loads` equality.
+**2. Import a markdown tree.**
 
 ```bash
-cargo test
-cd python/hql && python3 -m unittest discover -s tests -v
+hedron import --src ./notes --db ./intent.db --vault my-vault --agent my-agent
 ```
 
-Every push is checked on GitHub Actions (`ubuntu-latest`, rustc 1.83): the same tests, plus `cargo build --release` for `hedron` (and the `hedron-import` alias).
+**3. Query it.**
 
-## Grade commands
+```bash
+hedron hql --db ./intent.db --format json 'vault my-vault | search "HedronDB" | limit 20'
+```
 
-The exact commands that grade this crate. Run them from the crate root.
+`hedron hql` opens the file read-only. Quote the pipeline so the shell is not the parser.
+
+## What it is
+
+| | HedronDB |
+|---|---|
+| Store | One SQLite file (`nodes`, `edges`, `desired_states`, `events`) |
+| Isolation | Named vaults |
+| Writes | `Store` API with in-process tokens (never printed, never in YAML) |
+| Reads | `hedron hql` — read-only pipes |
+| Twin | `python/hql` must return the same JSON for the same pipeline |
+
+**Warm vs cool.** `state` is the latest desired-state spec/status (what is true now). `history` is the causal chain of that state (what superseded what). They are separate APIs and must not be mixed.
+
+## What you get
+
+- **`hedron import`** — walk a markdown tree into the store (wikilinks become `mentions`; unresolved targets are allowed).
+- **`hedron hql`** — operators `vault`, `agent`, `state`, `history`, `search`, `traverse`, `filter`, `select`, `limit`. Unknown operators (including `causal`) are rejected.
+- **`hedron-import`** — thin alias of `hedron import`. Prefer `hedron import`.
+- **Rust/Python result twin** — `cargo test --test hql_twin` compares `hedron hql --format json` with `python3 -m hql`.
+
+HQL details: [docs/HQL.md](docs/HQL.md).
+
+## How it works
+
+One file, two query paths, no network.
+
+- Store files should be mode `0600`.
+- Tokens live in process memory and rotate at the library gate. `hedron hql` does not take a token.
+- The crate is synchronous. No tokio, HTTP, or extra TCP ports.
+- Schema drift is reported, not migrated.
+
+<details>
+<summary><strong>Repository map</strong></summary>
+
+```
+src/                  # hedron-core + hedron / hedron-import binaries
+tests/                # phase0, cli, hql, import, hql_twin
+python/hql/           # stdlib sqlite3 result-twin (read-only)
+assets/               # product mark
+docs/HQL.md           # query language
+.github/workflows/    # ci.yml, nightly.yml
+```
+
+</details>
+
+## Status
+
+Phase 0 is the working tree at **0.1.0**; track `main`.
+
+- **Store / vaults / desired state / causal log:** ready.
+- **HQL v0 + Python twin:** ready.
+- **Import:** ready.
+- **Not in this repo:** HTTP service, SQL as the query language, embeddings, a UI, or a cluster control plane.
+
+CI (`ubuntu-latest`, rustc 1.83) runs `cargo test` and a release build of `hedron`.
+
+## Contributing
+
+Issues and pull requests are welcome.
 
 ```bash
 cargo test
 cargo test --test hql_twin
-cargo build --release && test -x target/release/hedron && test -x target/release/hedron-import
-cargo install --path . --locked --bin hedron
+cd python/hql && python3 -m unittest discover -s tests -v
+cargo build --release && test -x target/release/hedron
 ```
 
-- `cargo test` — the full Rust suite (phase0 / cli / hql / import) plus `tests/hql_twin.rs`.
-- `cargo test --test hql_twin` — the Rust-vs-Python result-twin on the fixture pipes (`json.loads` equality).
-- `cargo build --release && test -x ...` — release build, then prove both binaries exist.
-- `cargo install --path . --locked --bin hedron` — the install check: `hedron` installs from the crate root into a prefix using the locked `Cargo.lock`. `hedron-import` is still built by `cargo build --release` and CI; it is not dropped.
+## Credits
 
-The **nightly** workflow (`.github/workflows/nightly.yml`, schedule-only) is the install check, not a second product. It runs `cargo install --path . --locked --bin hedron --root "$RUNNER_TEMP/hedron-prefix"`, `test -x` the installed `bin/hedron`, then a no-store `hedron --help` smoke. It opens no TCP port and adds no schedule onto `ci.yml`.
-
-## Phase 0 kernel
-
-Phase 0 lives in the `hedron-core` crate. Tests are the surface. It proves:
-
-- **Desired State** — declarative spec vs observed status (Kubernetes-like).
-- **Causal Event Log** — append-only rows with `caused_by`, `reconciles`, `supersedes` on the event first.
-- **Two query paths** — `current_state` (Warm: what is true now) and `causal_chain` (Cool: supersession / causal history). They are separate APIs and must not be mixed.
-
-The first recon loop is **Option B (docs / EOD count)**. Storage is one SQLite file (`rusqlite` only) with four tables: `nodes`, `edges`, `desired_states`, `events`. Vaults are isolated named containers. An agent token is required for mutating and querying calls; tokens live in process memory and are rotated at the library gate. `hedron hql` is a separate read-only path: it does not take a token. `state` stays off the event log; `history` hangs off `Store::causal_chain`.
-
-Store files must be mode **0600**. Do not put tokens or other secrets in YAML / frontmatter. H.TEC is a `path` string on an Agent node, not a filesystem tree.
-
-The crate is sync-only. No tokio, pyo3, HTTP, or new TCP.
-
-## Option B recon (docs / EOD count)
-
-The first recon loop is **Option B**: `Store::reconcile` plus the `current_state` Warm path (what is true now) versus the `causal_chain` Cool path (supersession / causal history). The two paths are separate APIs and must not be mixed. This slice is docs / EOD count only — no crate logic, no `hedron recon` subcommand (there is none), and no Atrium / H.TEC fixtures folded into the count.
-
-Live citadel store (quoted, not invented): `~/Projects/hedrondb-data/eod-2026-08-25.db` (mode **0600**):
-
-- **8 nodes** — 1 Vault `hedron`, 1 Agent `eli`, 6 Document `briefs/2026-08-25/{eli,marci,jupi,merci,vini,lea}`.
-- **8 edges** — 6 `caused_by`, 1 `reconciles`, 1 `supersedes`.
-- **Desired State** `961310a5-71d3-4a82-9d50-5decf430a824` (`961310a5`) v2, status **Reconciled**; spec `required_briefs` = `eli, marci, jupi, merci, vini, lea`; observed `present` = all six; `missing: []`.
-
-The Atrium and H.TEC fixture stores (`fixture-atrium-*`, `fixture-htec-*`) are separate dbs and are **not** counted here.
-
-## Query surface
-
-`hedron hql` is the product HQL. `python/hql` is the stdlib `sqlite3` twin (`file:...?mode=ro`, never writes). Schema drift is reported, not migrated.
-
-```bash
-hedron hql --db FILE [--format tsv|table|json] 'vault atrium-fixture | search "HedronDB"'
-cd python/hql
-python3 -m hql --db FILE [--format tsv|table|json] PIPELINE
-```
-
-Fluent (Rust or Python): `Query::open(db).vault(...).agent(...).state()` or `.history()`, then `search` / `filter` / `select` / `limit` / `run()`.
-
-Operators: `vault`, `agent`, `state`, `history`, `search`, `traverse --edge/--hops`, `filter`, `select`, `limit`. `causal` is rejected (no alias). Default table columns hide `spec`/`status` unless selected. `state` attaches the latest `desired_states` row per `vault_id` onto Agent or Vault rows only. `history` replaces those rows with `causal_chain` event metadata for that latest Desired State (no spec/status/data). `agent` matches `extra.name` / `extra.title` / path basename (exact, else substring) and stays in the current vault slice.
-
-Three pipes that already ran on citadel (2026-08-25), plus the Warm session pipe:
-
-```text
-vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
-vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
-vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path
-vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
-vault htec-elio | agent elio | history
-```
-
-Notes without `extra.domain` stay without it. A domain filter drops those rows; it does not infer or backfill.
-
-## Markdown fixture loader
-
-`hedron import` (and the `hedron-import` alias) walks a markdown tree into a HedronDB store using `hedron-core` (wikilink `mentions`, unresolved `to_raw` allowed). It does not hardcode citadel paths. Tokens stay in-process and are never printed.
-
-```bash
-hedron import --src DIR --db FILE --vault NAME --agent NAME [--htec-path PATH] [--exclude-prefix mail_room/Uri/]
-```
-
-Frontmatter is the first `---` YAML fence; a deprecated `<!-- hal:authoritative:yaml -->` comment above it is ignored. HAL is the YAML keys (`name`, `title`, `domain`, …), not that html wrapper. GROK.md / HAL `supersedes` stays on the node `extra`. It is not written as `Event.supersedes`. Do not infer `extra.domain` or `extra.name` from the path.
-
-## Not in this repo
-
-HedronOS / NixOS / Kosha / tuwunel. Installing H.TEC on a Grok Bot. Hot feeds, Kelly, Client type. Atrium / lattice.db convert. HTTP or Redis. SQL as a query language. History / write / recon subcommands.
+HedronDB is built and maintained by [Hedronite](https://hedronite.com).
