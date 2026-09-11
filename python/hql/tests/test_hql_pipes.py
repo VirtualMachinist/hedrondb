@@ -1,4 +1,4 @@
-"""Three citadel 2026-08-25 pipes plus a missing-domain unit test."""
+"""Three demo-vault pipes plus a missing-domain unit test."""
 
 from __future__ import annotations
 
@@ -68,15 +68,15 @@ EDGE_D2 = "66666666-6666-6666-6666-666666666666"
 EDGE_R = "77777777-7777-7777-7777-777777777777"
 
 PIPE_FOUNDRY = (
-    'vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" '
+    'vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" '
     "| select path, extra.name | limit 20"
 )
 PIPE_DANGLING = (
-    'vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 '
+    'vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 '
     "| filter to_id == null | select path, to_raw"
 )
 PIPE_RESOLVED = (
-    'vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" '
+    'vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" '
     "| traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"
 )
 
@@ -87,7 +87,7 @@ def _build_tiny_db(path: Path) -> None:
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
         "VALUES (?, ?, 'Vault', 'h', ?, 1, 'cool', 1.0, ?)",
-        (VAULT, VAULT, "atrium-fixture", "name: atrium-fixture\n"),
+        (VAULT, VAULT, "demo-vault", "name: demo-vault\n"),
     )
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
@@ -95,7 +95,7 @@ def _build_tiny_db(path: Path) -> None:
         (
             FOUNDRY,
             VAULT,
-            "mail_room/hedron-foundry.md",
+            "inbox/hedron-foundry.md",
             "name: HedronDB kernel notes\ndomain: foundry\n",
         ),
     )
@@ -115,7 +115,7 @@ def _build_tiny_db(path: Path) -> None:
         (
             RESOLVED,
             VAULT,
-            "mail_room/resolved-mention.md",
+            "inbox/resolved-mention.md",
             "name: resolved mention note\n",
         ),
     )
@@ -151,7 +151,7 @@ class HqlPipesTest(unittest.TestCase):
     def test_pipe_foundry_hedron(self) -> None:
         rows = run_pipeline(self.db, PIPE_FOUNDRY)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["path"], "mail_room/hedron-foundry.md")
+        self.assertEqual(rows[0]["path"], "inbox/hedron-foundry.md")
         self.assertIn("HedronDB", rows[0]["extra.name"] or "")
 
     def test_pipe_dangling_lattice_mentions(self) -> None:
@@ -159,16 +159,16 @@ class HqlPipesTest(unittest.TestCase):
         self.assertEqual({row["to_raw"] for row in rows}, {"GhostLink", "OtherGhost"})
         self.assertTrue(all(row["path"] == "notes/lattice-edges.md" for row in rows))
 
-    def test_pipe_resolved_mail_room_mention(self) -> None:
+    def test_pipe_resolved_inbox_mention(self) -> None:
         rows = run_pipeline(self.db, PIPE_RESOLVED)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["from.path"], "mail_room/resolved-mention.md")
-        self.assertEqual(rows[0]["to.path"], "mail_room/hedron-foundry.md")
+        self.assertEqual(rows[0]["from.path"], "inbox/resolved-mention.md")
+        self.assertEqual(rows[0]["to.path"], "inbox/hedron-foundry.md")
 
     def test_missing_domain_dropped_by_filter_kept_by_search(self) -> None:
         kept = (
             Query.open(self.db)
-            .vault("atrium-fixture")
+            .vault("demo-vault")
             .search("lattice edges")
             .select("path", "extra.domain")
             .run()
@@ -179,7 +179,7 @@ class HqlPipesTest(unittest.TestCase):
 
         dropped = (
             Query.open(self.db)
-            .vault("atrium-fixture")
+            .vault("demo-vault")
             .search("lattice edges")
             .filter('extra.domain == "foundry"')
             .run()
@@ -189,14 +189,14 @@ class HqlPipesTest(unittest.TestCase):
     def test_fluent_matches_foundry_pipe(self) -> None:
         rows = (
             Query.open(self.db)
-            .vault("atrium-fixture")
+            .vault("demo-vault")
             .search("HedronDB")
             .filter('extra.domain == "foundry"')
             .select("path", "extra.name")
             .limit(20)
             .run()
         )
-        self.assertEqual([row["path"] for row in rows], ["mail_room/hedron-foundry.md"])
+        self.assertEqual([row["path"] for row in rows], ["inbox/hedron-foundry.md"])
 
 
 if __name__ == "__main__":

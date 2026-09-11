@@ -27,8 +27,8 @@ Quote the pipeline so the shell is not the parser.
 ## Examples
 
 ```text
-vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
-vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
+vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
+vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
 vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
 vault htec-elio | agent elio | history
 ```
@@ -38,8 +38,10 @@ Notes without `extra.domain` stay without it. A domain filter drops those rows; 
 ## Import
 
 ```bash
-hedron import --src DIR --db FILE --vault NAME --agent NAME [--htec-path PATH] [--exclude-prefix mail_room/Uri/]
+hedron import --src DIR --db FILE --vault NAME --agent NAME [--htec-path PATH] [--exclude-prefix inbox/private/]
 ```
+
+Default `--exclude-prefix` is `inbox/private/`. When `--briefs-date` is set, stems under `inbox/` are preferred if that tree exists.
 
 Frontmatter is the first `---` YAML fence. Do not put tokens in YAML. Do not infer `extra.domain` or `extra.name` from the path.
 

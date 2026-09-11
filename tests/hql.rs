@@ -66,9 +66,9 @@ const EDGE_D1: &str = "55555555-5555-5555-5555-555555555555";
 const EDGE_D2: &str = "66666666-6666-6666-6666-666666666666";
 const EDGE_R: &str = "77777777-7777-7777-7777-777777777777";
 
-const PIPE_FOUNDRY: &str = r#"vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
-const PIPE_DANGLING: &str = r#"vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
-const PIPE_RESOLVED: &str = r#"vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"#;
+const PIPE_FOUNDRY: &str = r#"vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
+const PIPE_DANGLING: &str = r#"vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
+const PIPE_RESOLVED: &str = r#"vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"#;
 
 const VAULT_SESSION: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const AGENT: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -82,7 +82,7 @@ const PIPE_SESSION: &str =
     "vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status";
 const STATUS_V1: &str = "conditions:\n- type: Pending\n";
 const STATUS_V2: &str = "conditions:\n- type: Reconciled\n";
-const SPEC: &str = "date: 2026-08-25\nrequired_briefs:\n- eli\n";
+const SPEC: &str = "date: 2026-08-25\nrequired_briefs:\n- alpha\n";
 
 struct TempDb {
     path: PathBuf,
@@ -114,7 +114,7 @@ fn build_tiny_db(path: &std::path::Path) {
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
          VALUES (?1, ?2, 'Vault', 'h', ?3, 1, 'cool', 1.0, ?4)",
-        rusqlite::params![VAULT_PIPE, VAULT_PIPE, "atrium-fixture", "name: atrium-fixture\n"],
+        rusqlite::params![VAULT_PIPE, VAULT_PIPE, "demo-vault", "name: demo-vault\n"],
     )
     .unwrap();
     conn.execute(
@@ -123,7 +123,7 @@ fn build_tiny_db(path: &std::path::Path) {
         rusqlite::params![
             FOUNDRY,
             VAULT_PIPE,
-            "mail_room/hedron-foundry.md",
+            "inbox/hedron-foundry.md",
             "name: HedronDB kernel notes\ndomain: foundry\n",
         ],
     )
@@ -145,7 +145,7 @@ fn build_tiny_db(path: &std::path::Path) {
         rusqlite::params![
             RESOLVED,
             VAULT_PIPE,
-            "mail_room/resolved-mention.md",
+            "inbox/resolved-mention.md",
             "name: resolved mention note\n",
         ],
     )
@@ -243,7 +243,7 @@ fn pipe_foundry_hedron() {
     assert_eq!(rows.len(), 1);
     assert_eq!(
         s(&rows[0], "path").as_deref(),
-        Some("mail_room/hedron-foundry.md")
+        Some("inbox/hedron-foundry.md")
     );
     assert!(s(&rows[0], "extra.name")
         .unwrap_or_default()
@@ -271,18 +271,18 @@ fn pipe_dangling_lattice_mentions() {
 }
 
 #[test]
-fn pipe_resolved_mail_room_mention() {
+fn pipe_resolved_inbox_mention() {
     let db = TempDb::new("tiny-resolved");
     build_tiny_db(&db.path);
     let rows = run_pipeline(&db.path, PIPE_RESOLVED).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         s(&rows[0], "from.path").as_deref(),
-        Some("mail_room/resolved-mention.md")
+        Some("inbox/resolved-mention.md")
     );
     assert_eq!(
         s(&rows[0], "to.path").as_deref(),
-        Some("mail_room/hedron-foundry.md")
+        Some("inbox/hedron-foundry.md")
     );
 }
 
@@ -292,7 +292,7 @@ fn missing_domain_dropped_by_filter_kept_by_search() {
     build_tiny_db(&db.path);
     let kept = Query::open(&db.path)
         .unwrap()
-        .vault("atrium-fixture")
+        .vault("demo-vault")
         .search("lattice edges")
         .select(["path", "extra.domain"])
         .run()
@@ -306,7 +306,7 @@ fn missing_domain_dropped_by_filter_kept_by_search() {
 
     let dropped = Query::open(&db.path)
         .unwrap()
-        .vault("atrium-fixture")
+        .vault("demo-vault")
         .search("lattice edges")
         .filter(r#"extra.domain == "foundry""#)
         .run()
@@ -320,7 +320,7 @@ fn fluent_matches_foundry_pipe() {
     build_tiny_db(&db.path);
     let rows = Query::open(&db.path)
         .unwrap()
-        .vault("atrium-fixture")
+        .vault("demo-vault")
         .search("HedronDB")
         .filter(r#"extra.domain == "foundry""#)
         .select(["path", "extra.name"])
@@ -331,7 +331,7 @@ fn fluent_matches_foundry_pipe() {
         rows.iter()
             .map(|row| s(row, "path").unwrap_or_default())
             .collect::<Vec<_>>(),
-        vec!["mail_room/hedron-foundry.md".to_string()]
+        vec!["inbox/hedron-foundry.md".to_string()]
     );
 }
 
@@ -562,9 +562,9 @@ fn history_matches_store_causal_chain_on_elio() {
     let _ = std::fs::remove_file(&path);
     let mut store = Store::open(&path).unwrap();
     let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
-    let spec = DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap();
     let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
-    let doc = Node::brief_document(boot.vault.id, "eli", "2026-08-25").unwrap();
+    let doc = Node::brief_document(boot.vault.id, "alpha", "2026-08-25").unwrap();
     store.put_node(&boot.token, doc).unwrap();
     let (_, ev1) = store.reconcile(&boot.token, ds.id).unwrap();
     let (_, ev2) = store.reconcile(&boot.token, ds.id).unwrap();

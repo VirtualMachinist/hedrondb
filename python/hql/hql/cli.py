@@ -23,7 +23,7 @@ def main(argv: Optional[list[str]] = None, out: Optional[TextIO] = None) -> int:
     parser.add_argument(
         "pipeline",
         nargs="+",
-        help='pipeline, e.g. vault atrium-fixture | search "HedronDB"',
+        help='pipeline, e.g. vault demo-vault | search "HedronDB"',
     )
     args = parser.parse_args(argv)
     pipeline = " ".join(args.pipeline)
