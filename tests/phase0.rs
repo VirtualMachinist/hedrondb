@@ -34,7 +34,7 @@ fn recon_loop_option_b_current_state_and_causal_chain() {
     let store = &mut tmp.store;
 
     let boot = store
-        .bootstrap("atrium", "scribe", "agents/scribe")
+        .bootstrap("demo-vault", "scribe", "agents/scribe")
         .unwrap();
     assert_eq!(boot.agent.htec_path.as_deref(), Some("agents/scribe"));
     let token = store.rotate_token(&boot.token).unwrap();
@@ -43,7 +43,7 @@ fn recon_loop_option_b_current_state_and_causal_chain() {
         Err(Error::Unauthorized)
     ));
 
-    let spec = DesiredState::briefs_spec("2026-08-25", &["eli", "marci", "jupi"]).unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["alpha", "beta", "gamma"]).unwrap();
     let ds = store.put_desired_state(&token, spec, 0.8).unwrap();
     assert_eq!(ds.state_version, 1);
 
@@ -62,7 +62,7 @@ fn recon_loop_option_b_current_state_and_causal_chain() {
         3
     );
 
-    for name in ["eli", "marci"] {
+    for name in ["alpha", "beta"] {
         let doc = Node::brief_document(boot.vault.id, name, "2026-08-25").unwrap();
         store.put_node(&token, doc).unwrap();
     }
@@ -95,7 +95,7 @@ fn recon_loop_option_b_current_state_and_causal_chain() {
         current.spec["required_briefs"].as_sequence().unwrap().len(),
         3
     );
-    assert_eq!(current.status.observed["missing"][0].as_str(), Some("jupi"));
+    assert_eq!(current.status.observed["missing"][0].as_str(), Some("gamma"));
     assert_eq!(current.state_version, 2);
 
     let chain = store.causal_chain(&token, ds.id).unwrap();
@@ -115,7 +115,7 @@ fn vault_isolation_denies_cross_vault_read() {
     let mut tmp = TempStore::new();
     let a = tmp.store.bootstrap("alpha", "agent-a", "agents/a").unwrap();
     let b = tmp.store.bootstrap("beta", "agent-b", "agents/b").unwrap();
-    let spec = DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap();
     let ds = tmp.store.put_desired_state(&a.token, spec, 0.5).unwrap();
 
     match tmp.store.current_state(&b.token, ds.id) {
@@ -148,7 +148,7 @@ fn hivemind_and_shared_are_deny_by_default_until_grant() {
         .store
         .put_desired_state(
             &hive.token,
-            DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap(),
+            DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap(),
             0.4,
         )
         .unwrap();
@@ -170,7 +170,7 @@ fn hivemind_and_shared_are_deny_by_default_until_grant() {
         .store
         .put_desired_state(
             &shared.token,
-            DesiredState::briefs_spec("2026-08-25", &["marci"]).unwrap(),
+            DesiredState::briefs_spec("2026-08-25", &["beta"]).unwrap(),
             0.4,
         )
         .unwrap();
@@ -188,19 +188,19 @@ fn unresolved_edge_target_allowed() {
     let mut tmp = TempStore::new();
     let boot = tmp
         .store
-        .bootstrap("atrium", "scribe", "agents/scribe")
+        .bootstrap("demo-vault", "scribe", "agents/scribe")
         .unwrap();
     let edge = Edge::new(
         boot.vault.id,
         boot.agent.id,
         None,
-        Some("briefs/2026-08-25/jupi".into()),
+        Some("briefs/2026-08-25/gamma".into()),
         "mentions",
     )
     .unwrap();
     let stored = tmp.store.put_edge(&boot.token, edge).unwrap();
     assert!(stored.to_id.is_none());
-    assert_eq!(stored.to_raw.as_deref(), Some("briefs/2026-08-25/jupi"));
+    assert_eq!(stored.to_raw.as_deref(), Some("briefs/2026-08-25/gamma"));
 
     let causal = Edge::new(
         boot.vault.id,
