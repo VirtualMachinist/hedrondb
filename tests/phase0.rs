@@ -471,3 +471,25 @@ fn crate_sources_stay_under_1000_lines() {
         );
     }
 }
+
+/// The line-splitting extra parser is gone from both engines.
+#[test]
+fn legacy_extra_parser_is_gone() {
+    let needle = ["parse_extra", "_map"].concat();
+    let mut files = crate_source_files();
+    for entry in fs::read_dir("python/hql/hql").unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("py") {
+            files.push(path);
+        }
+    }
+    assert!(files.iter().any(|p| p.ends_with("row.py")), "python engine not scanned");
+    for path in files {
+        let src = fs::read_to_string(&path).unwrap();
+        assert!(
+            !src.contains(&needle),
+            "{} still carries {needle}",
+            path.display()
+        );
+    }
+}

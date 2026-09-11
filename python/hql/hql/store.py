@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from hql.row import Row, parse_extra_map
+from hql.row import Row, parse_extra
 
 # Crate-root schema.sql is the only schema source (copy of vault store.sql).
 # The Python twin reads that file; it never carries its own column list.
@@ -124,7 +124,7 @@ class Store:
             Row(
                 path=row["path"],
                 extra=row["extra"] or "",
-                extra_map=parse_extra_map(row["extra"]),
+                extra_map=parse_extra(row["extra"]),
                 node_id=row["id"],
                 vault_id=row["vault_id"],
                 node_type=row["type"],
@@ -149,29 +149,25 @@ class Store:
             for row in rows
         ]
 
-    def latest_desired_states(self) -> dict[str, dict]:
-        """Warm path: newest desired_states row per vault_id. Never reads events."""
+    def desired_states(self) -> list[dict]:
+        """Warm path: every named desired state, by vault then name. Never reads events."""
         rows = self.conn.execute(
-            "SELECT id, vault_id, state_version, reconciled_by, importance, spec, status "
-            "FROM desired_states"
+            "SELECT id, vault_id, name, state_version, reconciled_by, importance, spec, status "
+            "FROM desired_states ORDER BY vault_id ASC, name ASC"
         ).fetchall()
-        latest: dict[str, dict] = {}
-        for row in rows:
-            vault_id = row["vault_id"]
-            version = int(row["state_version"])
-            prev = latest.get(vault_id)
-            if prev is not None and version <= prev["state_version"]:
-                continue
-            latest[vault_id] = {
+        return [
+            {
                 "id": row["id"],
-                "vault_id": vault_id,
-                "state_version": version,
+                "vault_id": row["vault_id"],
+                "name": row["name"],
+                "state_version": int(row["state_version"]),
                 "reconciled_by": row["reconciled_by"],
                 "importance": row["importance"],
                 "spec": row["spec"] or "",
                 "status": row["status"] or "",
             }
-        return latest
+            for row in rows
+        ]
 
     def causal_chain(self, desired_state_id: str) -> list[dict]:
         """Cool path: events that reconcile this Desired State. No spec/status/data."""
@@ -201,7 +197,7 @@ class Store:
         for row in self.conn.execute(
             "SELECT id, path, extra FROM nodes WHERE type = 'Vault'"
         ).fetchall():
-            extra_map = parse_extra_map(row["extra"])
+            extra_map = parse_extra(row["extra"])
             if row["path"] == name or extra_map.get("name") == name:
                 ids.append(row["id"])
         return ids

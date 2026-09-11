@@ -28,6 +28,16 @@ const PIPE_NO_EVENTS: &str =
 const PIPE_HISTORY: &str = "vault prod | agent deploy | history";
 const PIPE_HISTORY_SELECT: &str =
     "vault prod | agent deploy | history | select id, ts, actor, type, caused_by, reconciles, supersedes, spec, status";
+const PIPE_ALL_STATES: &str = "vault prod | state";
+const PIPE_ALL_STATES_SELECT: &str = "vault prod | state | select name, state_version, path, id, spec, status, importance";
+const PIPE_ONE_STATE: &str = "vault prod | state eod-2026-08-25";
+const PIPE_OPS_EXPLICIT: &str = "vault prod | agent ops | state deploy | select path, extra.title, name, id";
+const PIPE_OPS_NONE: &str = "vault prod | agent ops | state";
+const PIPE_NO_SUBJECT: &str = r#"vault prod | filter path ^= "notes/" | state deploy"#;
+const PIPE_NO_SUBJECT_HISTORY: &str = r#"vault prod | filter path ^= "notes/" | history deploy | select id, supersedes, name"#;
+const PIPE_STATE_NO_EVENTS: &str = "vault prod | agent deploy | state | select ts, actor, supersedes, name";
+const PIPE_YAML_EXTRA: &str = r#"vault demo-vault | filter path == "notes/nested.md" | select path, extra.tags, extra.version, extra.meta, extra.flag, extra.empty, extra.when, extra.ratio, extra.missing"#;
+const PIPE_YAML_FILTER: &str = r#"vault demo-vault | filter extra.version == "2" && extra.flag == "true" | select path"#;
 
 struct TempDb {
     path: PathBuf,
@@ -92,6 +102,13 @@ fn build_tiny_db(path: &Path) {
     )
     .unwrap();
     conn.execute(
+        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
+         VALUES ('88888888-8888-8888-8888-888888888888', ?1, 'Document', 'h', 'notes/nested.md', 1, 'warm', 0.5, \
+         'tags:\n- a\n- b\nversion: 2\nmeta:\n  k: v\nflag: true\nempty: ~\nwhen: 2026-08-25\nratio: 1.0\n')",
+        [vault],
+    )
+    .unwrap();
+    conn.execute(
         "INSERT INTO edges (id, vault_id, from_id, to_id, to_raw, type, properties) \
          VALUES ('55555555-5555-5555-5555-555555555555', ?1, ?2, NULL, 'GhostLink', 'mentions', '{}')",
         [vault, lattice],
@@ -144,6 +161,15 @@ fn build_session_db(path: &Path) {
     let alpha = Node::brief_document(vault_id, "alpha", "2026-08-25").unwrap();
     store.put_node(&token, alpha).unwrap();
     store.reconcile(&token, ds.id).unwrap();
+    let eod = store
+        .put_desired_state(
+            &token,
+            "eod-2026-08-25",
+            DesiredState::docs_eod_spec("2026-08-25", &["alpha", "beta"]).unwrap(),
+            0.4,
+        )
+        .unwrap();
+    store.reconcile(&token, eod.id).unwrap();
 }
 
 fn run_hedron_hql(db: &Path, pipeline: &str) -> String {
@@ -238,7 +264,13 @@ fn assert_twins(db: &Path, pipeline: &str) {
 fn rust_and_python_agree_on_demo_vault_pipes() {
     let db = TempDb::new("pipes");
     build_tiny_db(&db.path);
-    for pipeline in [PIPE_FOUNDRY, PIPE_DANGLING, PIPE_RESOLVED] {
+    for pipeline in [
+        PIPE_FOUNDRY,
+        PIPE_DANGLING,
+        PIPE_RESOLVED,
+        PIPE_YAML_EXTRA,
+        PIPE_YAML_FILTER,
+    ] {
         assert_twins(&db.path, pipeline);
     }
 }
@@ -253,6 +285,14 @@ fn rust_and_python_agree_on_session_pipes() {
         PIPE_NO_EVENTS,
         PIPE_HISTORY,
         PIPE_HISTORY_SELECT,
+        PIPE_ALL_STATES,
+        PIPE_ALL_STATES_SELECT,
+        PIPE_ONE_STATE,
+        PIPE_OPS_EXPLICIT,
+        PIPE_OPS_NONE,
+        PIPE_NO_SUBJECT,
+        PIPE_NO_SUBJECT_HISTORY,
+        PIPE_STATE_NO_EVENTS,
     ] {
         assert_twins(&db.path, pipeline);
     }

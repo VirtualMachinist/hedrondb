@@ -1,9 +1,10 @@
-//! Query rows: a node, or a traverse walk (from + edge + optional to).
+//! Typed query rows. Each variant owns exactly the fields it can answer for;
+//! nothing falls back from one kind to another.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Scalar cell. Missing extra keys and absent walk fields are Null.
+/// Scalar cell. Missing extra keys and absent fields are Null.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -36,12 +37,7 @@ impl Value {
 
     /// Python `str(left)` used by filter compare for a present value.
     pub fn py_str(&self) -> String {
-        match self {
-            Value::Null => String::new(),
-            Value::Str(s) => s.clone(),
-            Value::Int(n) => n.to_string(),
-            Value::Float(f) => format_float(*f),
-        }
+        self.to_display()
     }
 }
 
@@ -71,265 +67,333 @@ pub(crate) fn format_float(v: f64) -> String {
     }
 }
 
-/// Parse YAML-ish `key: value` lines. Missing / empty values are Null.
-pub fn parse_extra_map(extra: Option<&str>) -> BTreeMap<String, Option<String>> {
+/// `nodes.extra` as a YAML mapping. Top-level null is None; every other value
+/// renders to text (`extra.k` v0 has no JSON path): scalars as themselves,
+/// sequences / mappings in YAML flow style. Non-mapping or invalid YAML is empty.
+pub type ExtraMap = BTreeMap<String, Option<String>>;
+
+pub fn parse_extra(extra: &str) -> ExtraMap {
     let mut mapping = BTreeMap::new();
-    let Some(extra) = extra else {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(extra)
+    else {
         return mapping;
     };
-    if extra.is_empty() {
-        return mapping;
-    }
-    for raw_line in extra.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line == "---" || line == "..." || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
+    for (key, value) in map {
+        let key = match yaml_text(&key) {
+            Some(k) => k,
+            None => "null".to_string(),
         };
-        let key = key.trim();
-        if key.is_empty() || key.starts_with('-') || key.chars().any(|ch| ch.is_whitespace()) {
-            continue;
-        }
-        mapping.insert(key.to_string(), unquote_extra(value.trim()));
+        mapping.insert(key, yaml_text(&value));
     }
     mapping
 }
 
-fn unquote_extra(value: &str) -> Option<String> {
-    if value.is_empty() || matches!(value, "null" | "~" | "Null" | "NULL") {
-        return None;
+/// Text form of a YAML value; None only for a top-level null.
+fn yaml_text(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::Null => None,
+        other => Some(yaml_flow(other)),
     }
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        let first = bytes[0];
-        if (first == b'\'' || first == b'"') && bytes[value.len() - 1] == first {
-            let inner = &value[1..value.len() - 1];
-            return if inner.is_empty() {
-                None
-            } else {
-                Some(inner.to_string())
-            };
-        }
-    }
-    Some(value.to_string())
 }
 
-/// One pipeline row. Missing extra keys and absent walk fields are Null.
+/// YAML flow rendering shared with the Python twin: `[a, b]`, `{k: v}`.
+fn yaml_flow(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::Null => "null".into(),
+        serde_yaml::Value::Bool(b) => if *b { "true" } else { "false" }.into(),
+        serde_yaml::Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => i.to_string(),
+            (None, Some(u), _) => u.to_string(),
+            (None, None, Some(f)) => format_float(f),
+            _ => n.to_string(),
+        },
+        serde_yaml::Value::String(s) => s.clone(),
+        serde_yaml::Value::Sequence(items) => {
+            let parts: Vec<String> = items.iter().map(yaml_flow).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}: {}", yaml_flow(k), yaml_flow(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_flow(&tagged.value),
+    }
+}
+
+/// A `nodes` row.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Row {
+pub struct NodeView {
+    pub id: String,
+    pub vault_id: String,
+    pub node_type: String,
     pub path: Option<String>,
     pub extra: String,
-    pub extra_map: BTreeMap<String, Option<String>>,
-    pub node_id: Option<String>,
-    pub vault_id: Option<String>,
-    pub node_type: Option<String>,
-    pub from_id: Option<String>,
-    pub from_path: Option<String>,
+    pub extra_map: ExtraMap,
+}
+
+impl NodeView {
+    pub fn extra_get(&self, key: &str) -> Option<&str> {
+        self.extra_map.get(key).and_then(|v| v.as_deref())
+    }
+}
+
+/// An `edges` row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EdgeView {
+    pub id: String,
+    pub from_id: String,
     pub to_id: Option<String>,
     pub to_raw: Option<String>,
-    pub to_path: Option<String>,
-    pub edge_type: Option<String>,
+    pub edge_type: String,
     pub properties: String,
-    pub spec: Option<String>,
-    pub status: Option<String>,
-    pub state_version: Option<i64>,
+}
+
+/// Warm `desired_states` row. Never carries events.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesiredStateView {
+    pub id: String,
+    pub vault_id: String,
+    pub name: String,
+    pub state_version: i64,
     pub reconciled_by: Option<String>,
-    pub importance: Option<f64>,
-    pub state_id: Option<String>,
-    pub event_id: Option<String>,
-    pub ts: Option<i64>,
-    pub actor: Option<String>,
-    pub event_type: Option<String>,
+    pub importance: f64,
+    pub spec: String,
+    pub status: String,
+}
+
+/// Cool `events` row. Drops `data`; never carries spec / status.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryEventView {
+    pub id: String,
+    pub vault_id: String,
+    pub ts: i64,
+    pub actor: String,
+    pub event_type: String,
     pub caused_by: Option<String>,
     pub reconciles: Option<String>,
     pub supersedes: Option<String>,
-    pub(crate) selected: Option<Vec<(String, Value)>>,
 }
 
-impl Default for Row {
-    fn default() -> Self {
-        Self {
-            path: None,
-            extra: String::new(),
-            extra_map: BTreeMap::new(),
-            node_id: None,
-            vault_id: None,
-            node_type: None,
-            from_id: None,
-            from_path: None,
-            to_id: None,
-            to_raw: None,
-            to_path: None,
-            edge_type: None,
-            properties: String::new(),
-            spec: None,
-            status: None,
-            state_version: None,
-            reconciled_by: None,
-            importance: None,
-            state_id: None,
-            event_id: None,
-            ts: None,
-            actor: None,
-            event_type: None,
-            caused_by: None,
-            reconciles: None,
-            supersedes: None,
-            selected: None,
-        }
-    }
+/// One pipeline row.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Row {
+    Node(NodeView),
+    /// One traverse step: `from` node, the edge, and the resolved `to` node.
+    Walk {
+        from: NodeView,
+        edge: EdgeView,
+        to: Option<NodeView>,
+    },
+    /// Warm overlay: a named desired state, optionally under the Agent / Vault
+    /// node that selected it. `subject` is None for `state <name>` over a slice
+    /// with no such node.
+    State {
+        subject: Option<NodeView>,
+        ds: DesiredStateView,
+    },
+    /// Cool: one causal event.
+    History { event: HistoryEventView },
+    /// Output of `select`: fixed columns over `source`; later stages still see
+    /// the source node for traverse / search.
+    Selected {
+        columns: Vec<(String, Value)>,
+        source: Box<Row>,
+    },
 }
 
 impl Row {
-    pub fn selected_fields(&self) -> Option<Vec<String>> {
-        self.selected
-            .as_ref()
-            .map(|pairs| pairs.iter().map(|(k, _)| k.clone()).collect())
+    /// The node this row stands on, if any: the node itself, a walk's `from`,
+    /// a state's subject. History rows stand on nothing.
+    pub fn node(&self) -> Option<&NodeView> {
+        match self {
+            Row::Node(node) => Some(node),
+            Row::Walk { from, .. } => Some(from),
+            Row::State { subject, .. } => subject.as_ref(),
+            Row::History { .. } => None,
+            Row::Selected { source, .. } => source.node(),
+        }
     }
 
+    pub fn node_id(&self) -> Option<&str> {
+        self.node().map(|n| n.id.as_str())
+    }
+
+    pub fn node_type(&self) -> Option<&str> {
+        self.node().map(|n| n.node_type.as_str())
+    }
+
+    /// Vault the row belongs to.
+    pub fn vault_id(&self) -> Option<&str> {
+        match self {
+            Row::State { ds, .. } => Some(&ds.vault_id),
+            Row::History { event } => Some(&event.vault_id),
+            Row::Selected { source, .. } => source.vault_id(),
+            _ => self.node().map(|n| n.vault_id.as_str()),
+        }
+    }
+
+    pub fn to_id(&self) -> Option<&str> {
+        match self {
+            Row::Walk { edge, .. } => edge.to_id.as_deref(),
+            Row::Selected { source, .. } => source.to_id(),
+            _ => None,
+        }
+    }
+
+    pub fn from_id(&self) -> Option<&str> {
+        match self {
+            Row::Walk { edge, .. } => Some(&edge.from_id),
+            Row::Selected { source, .. } => source.from_id(),
+            _ => None,
+        }
+    }
+
+    pub fn selected_fields(&self) -> Option<Vec<String>> {
+        match self {
+            Row::Selected { columns, .. } => Some(columns.iter().map(|(k, _)| k.clone()).collect()),
+            _ => None,
+        }
+    }
+
+    /// Cell for `field`. A selected row answers only for its columns.
     pub fn get(&self, field: &str) -> Value {
-        if let Some(pairs) = &self.selected {
-            return pairs
+        match self {
+            Row::Selected { columns, .. } => columns
                 .iter()
                 .find(|(k, _)| k == field)
                 .map(|(_, v)| v.clone())
-                .unwrap_or(Value::Null);
-        }
-        self.raw_get(field)
-    }
-
-    pub fn raw_get(&self, field: &str) -> Value {
-        if let Some(key) = field.strip_prefix("extra.") {
-            return match self.extra_map.get(key) {
-                Some(Some(s)) => Value::Str(s.clone()),
-                Some(None) | None => Value::Null,
-            };
-        }
-        match field {
-            "path" => opt_str(&self.path),
-            "to_id" => opt_str(&self.to_id),
-            "to_raw" => opt_str(&self.to_raw),
-            "from_id" => opt_str(&self.from_id),
-            "from.path" => opt_str(&self.from_path),
-            "to.path" => opt_str(&self.to_path),
-            "id" => {
-                if let Some(id) = &self.event_id {
-                    Value::Str(id.clone())
-                } else if let Some(id) = &self.state_id {
-                    Value::Str(id.clone())
-                } else {
-                    opt_str(&self.node_id)
-                }
-            }
-            "vault_id" => opt_str(&self.vault_id),
-            "node_type" => opt_str(&self.node_type),
-            "type" => {
-                if let Some(event_type) = &self.event_type {
-                    Value::Str(event_type.clone())
-                } else {
-                    opt_str(&self.edge_type)
-                }
-            }
-            "ts" => match self.ts {
-                Some(n) => Value::Int(n),
-                None => Value::Null,
+                .unwrap_or(Value::Null),
+            Row::Node(node) => node_field(node, field),
+            Row::Walk { from, edge, to } => match field {
+                "from_id" => Value::Str(edge.from_id.clone()),
+                "from.path" => opt_str(&from.path),
+                "to_id" => opt_str(&edge.to_id),
+                "to_raw" => opt_str(&edge.to_raw),
+                "to.path" => match to {
+                    Some(dest) => opt_str(&dest.path),
+                    None => Value::Null,
+                },
+                "type" => Value::Str(edge.edge_type.clone()),
+                _ => node_field(from, field),
             },
-            "actor" => opt_str(&self.actor),
-            "caused_by" => opt_str(&self.caused_by),
-            "reconciles" => opt_str(&self.reconciles),
-            "supersedes" => opt_str(&self.supersedes),
-            "spec" => opt_str(&self.spec),
-            "status" => opt_str(&self.status),
-            "state_version" => match self.state_version {
-                Some(n) => Value::Int(n),
-                None => Value::Null,
+            Row::State { subject, ds } => match field {
+                "id" => Value::Str(ds.id.clone()),
+                "vault_id" => Value::Str(ds.vault_id.clone()),
+                "name" => Value::Str(ds.name.clone()),
+                "state_version" => Value::Int(ds.state_version),
+                "reconciled_by" => opt_str(&ds.reconciled_by),
+                "importance" => Value::Float(ds.importance),
+                "spec" => Value::Str(ds.spec.clone()),
+                "status" => Value::Str(ds.status.clone()),
+                _ => match subject {
+                    Some(node) => node_field(node, field),
+                    None => Value::Null,
+                },
             },
-            "reconciled_by" => opt_str(&self.reconciled_by),
-            "importance" => match self.importance {
-                Some(n) => Value::Float(n),
-                None => Value::Null,
+            Row::History { event } => match field {
+                "id" => Value::Str(event.id.clone()),
+                "vault_id" => Value::Str(event.vault_id.clone()),
+                "ts" => Value::Int(event.ts),
+                "actor" => Value::Str(event.actor.clone()),
+                "type" => Value::Str(event.event_type.clone()),
+                "caused_by" => opt_str(&event.caused_by),
+                "reconciles" => opt_str(&event.reconciles),
+                "supersedes" => opt_str(&event.supersedes),
+                _ => Value::Null,
             },
-            _ => Value::Null,
         }
-    }
-
-    /// Warm overlay: latest desired_states fields. Does not touch events.
-    pub fn with_state(&self, ds: &DesiredStateView) -> Row {
-        let mut row = self.clone();
-        row.spec = Some(ds.spec.clone());
-        row.status = Some(ds.status.clone());
-        row.state_version = Some(ds.state_version);
-        row.reconciled_by = ds.reconciled_by.clone();
-        row.importance = Some(ds.importance);
-        row.state_id = Some(ds.id.clone());
-        row.selected = None;
-        row
-    }
-
-    /// Cool chain row from `Store::causal_chain`. No spec/status/data.
-    pub fn from_history(event: &HistoryEventView) -> Row {
-        let mut row = Row {
-            vault_id: Some(event.vault_id.clone()),
-            event_id: Some(event.id.clone()),
-            ts: Some(event.ts),
-            actor: Some(event.actor.clone()),
-            event_type: Some(event.event_type.clone()),
-            caused_by: event.caused_by.clone(),
-            reconciles: event.reconciles.clone(),
-            supersedes: event.supersedes.clone(),
-            ..Row::default()
-        };
-        let selected = default_history_fields()
-            .iter()
-            .map(|field| ((*field).to_string(), row.raw_get(field)))
-            .collect();
-        row.selected = Some(selected);
-        row
     }
 
     pub fn project(&self, fields: &[String]) -> Row {
-        let selected = fields
+        let source = match self {
+            Row::Selected { source, .. } => source.as_ref(),
+            other => other,
+        };
+        let columns = fields
             .iter()
-            .map(|field| (field.clone(), self.raw_get(field)))
+            .map(|field| (field.clone(), source.get(field)))
             .collect();
-        let mut row = self.clone();
-        row.selected = Some(selected);
-        row
+        Row::Selected {
+            columns,
+            source: Box::new(source.clone()),
+        }
+    }
+
+    /// Columns shown when nothing was selected.
+    pub fn default_fields(&self) -> &'static [&'static str] {
+        match self {
+            Row::History { .. } => default_history_fields(),
+            Row::State { .. } => default_state_fields(),
+            Row::Selected { source, .. } => source.default_fields(),
+            _ => default_output_fields(),
+        }
     }
 
     pub fn as_dict(&self, fields: Option<&[String]>) -> Vec<(String, Value)> {
-        if let Some(pairs) = &self.selected {
-            return pairs.clone();
+        if let Row::Selected { columns, .. } = self {
+            return columns.clone();
         }
-        let default = default_output_fields();
         let owned: Vec<String> = match fields {
             Some(f) => f.to_vec(),
-            None => default.iter().map(|s| (*s).to_string()).collect(),
+            None => self.default_fields().iter().map(|s| (*s).to_string()).collect(),
         };
         owned
             .into_iter()
             .map(|field| {
-                let value = self.raw_get(&field);
+                let value = self.get(&field);
                 (field, value)
             })
             .collect()
     }
 
+    /// What `search` scans: the node's path + extra, plus a walk's edge text.
     pub fn searchable_text(&self) -> String {
-        format!(
-            "{}\n{}\n{}\n{}",
-            self.path.as_deref().unwrap_or(""),
-            self.extra,
-            self.to_raw.as_deref().unwrap_or(""),
-            self.properties
-        )
+        let (to_raw, properties) = match self {
+            Row::Walk { edge, .. } => (edge.to_raw.as_deref().unwrap_or(""), edge.properties.as_str()),
+            Row::Selected { source, .. } => return source.searchable_text(),
+            _ => ("", ""),
+        };
+        let (path, extra) = match self.node() {
+            Some(node) => (node.path.as_deref().unwrap_or(""), node.extra.as_str()),
+            None => ("", ""),
+        };
+        format!("{path}\n{extra}\n{to_raw}\n{properties}")
+    }
+}
+
+fn node_field(node: &NodeView, field: &str) -> Value {
+    if let Some(key) = field.strip_prefix("extra.") {
+        return match node.extra_map.get(key) {
+            Some(Some(s)) => Value::Str(s.clone()),
+            Some(None) | None => Value::Null,
+        };
+    }
+    match field {
+        "path" => opt_str(&node.path),
+        "id" => Value::Str(node.id.clone()),
+        "vault_id" => Value::Str(node.vault_id.clone()),
+        "node_type" => Value::Str(node.node_type.clone()),
+        _ => Value::Null,
     }
 }
 
 pub fn default_output_fields() -> &'static [&'static str] {
     &["path", "from.path", "to.path", "to_id", "to_raw", "from_id"]
+}
+
+/// Warm default columns. Identity + version; spec / status only on request.
+pub fn default_state_fields() -> &'static [&'static str] {
+    &[
+        "path",
+        "name",
+        "state_version",
+        "reconciled_by",
+        "importance",
+        "id",
+    ]
 }
 
 /// Cool-path default columns. Event metadata only; no spec/status/data.
@@ -350,28 +414,4 @@ fn opt_str(value: &Option<String>) -> Value {
         Some(s) => Value::Str(s.clone()),
         None => Value::Null,
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct DesiredStateView {
-    pub id: String,
-    pub vault_id: String,
-    pub state_version: i64,
-    pub reconciled_by: Option<String>,
-    pub importance: f64,
-    pub spec: String,
-    pub status: String,
-}
-
-/// Cool-path event view. Drops `data` so tokens / payloads never reach HQL rows.
-#[derive(Clone, Debug)]
-pub struct HistoryEventView {
-    pub id: String,
-    pub vault_id: String,
-    pub ts: i64,
-    pub actor: String,
-    pub event_type: String,
-    pub caused_by: Option<String>,
-    pub reconciles: Option<String>,
-    pub supersedes: Option<String>,
 }
