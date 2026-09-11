@@ -20,6 +20,7 @@ const RESOLVED: &str = "44444444-4444-4444-4444-444444444444";
 const EDGE_D1: &str = "55555555-5555-5555-5555-555555555555";
 const EDGE_D2: &str = "66666666-6666-6666-6666-666666666666";
 const EDGE_R: &str = "77777777-7777-7777-7777-777777777777";
+const NESTED: &str = "88888888-8888-8888-8888-888888888888";
 
 const PIPE_FOUNDRY: &str = r#"vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
 const PIPE_DANGLING: &str = r#"vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
@@ -94,6 +95,17 @@ fn build_tiny_db(path: &std::path::Path) {
         ],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
+         VALUES (?1, ?2, 'Document', 'h', ?3, 1, 'warm', 0.5, ?4)",
+        rusqlite::params![
+            NESTED,
+            VAULT_PIPE,
+            "notes/nested.md",
+            "tags:\n- a\n- b\nversion: 2\nmeta:\n  k: v\nflag: true\nempty: ~\nwhen: 2026-08-25\n",
+        ],
+    )
+    .unwrap();
     for (edge_id, to_raw) in [(EDGE_D1, "GhostLink"), (EDGE_D2, "OtherGhost")] {
         conn.execute(
             "INSERT INTO edges (id, vault_id, from_id, to_id, to_raw, type, properties) \
@@ -116,11 +128,13 @@ struct SessionIds {
     ds: Uuid,
     ev1: Uuid,
     ev2: Uuid,
+    eod: Uuid,
 }
 
 /// Warm/cool session fixture built through `Store`: vault `prod`, agent
-/// `deploy` (extra.name), a title-only agent `ops`, one document, and ONE
-/// desired state named `deploy` reconciled twice (version 3, two events).
+/// `deploy` (extra.name), a title-only agent `ops`, one document, and TWO
+/// named desired states: `deploy` reconciled twice (version 3, two events)
+/// and `eod-2026-08-25` reconciled once.
 fn build_session_db(path: &std::path::Path) -> SessionIds {
     let mut store = Store::open(path).unwrap();
     let boot = store.bootstrap("prod", "deploy", "agents/deploy").unwrap();
@@ -156,12 +170,22 @@ fn build_session_db(path: &std::path::Path) -> SessionIds {
     let alpha = Node::brief_document(vault_id, "alpha", "2026-08-25").unwrap();
     store.put_node(&token, alpha).unwrap();
     let (_, ev2) = store.reconcile(&token, ds.id).unwrap();
+    let eod = store
+        .put_desired_state(
+            &token,
+            "eod-2026-08-25",
+            DesiredState::docs_eod_spec("2026-08-25", &["alpha", "beta"]).unwrap(),
+            0.4,
+        )
+        .unwrap();
+    store.reconcile(&token, eod.id).unwrap();
 
     SessionIds {
         agent: boot.agent.id,
         ds: ds.id,
         ev1: ev1.id,
         ev2: ev2.id,
+        eod: eod.id,
     }
 }
 
@@ -476,11 +500,12 @@ fn history_does_not_bleed_spec_status_or_payloads() {
     build_session_db(&db.path);
     let rows = run_pipeline(
         &db.path,
-        "vault prod | agent deploy | history | select id, spec, status, state_version, data, reconciles, supersedes",
+        "vault prod | agent deploy | history | select id, spec, status, state_version, name, data, reconciles, supersedes",
     )
     .unwrap();
     assert_eq!(rows.len(), 2);
     for row in &rows {
+        assert_eq!(row.get("name"), Value::Null);
         assert_eq!(row.get("spec"), Value::Null);
         assert_eq!(row.get("status"), Value::Null);
         assert_eq!(row.get("state_version"), Value::Null);
@@ -561,9 +586,124 @@ fn history_matches_store_causal_chain() {
 fn hql_opens_read_only() {
     let db = TempDb::new("ro");
     build_tiny_db(&db.path);
+    let before = std::fs::read(&db.path).unwrap();
+    run_pipeline(&db.path, PIPE_RESOLVED).unwrap();
+    run_pipeline(&db.path, "vault demo-vault | state").unwrap();
+    assert_eq!(std::fs::read(&db.path).unwrap(), before, "HQL must not touch the file");
     let _store = RoStore::open(&db.path).unwrap();
     let write = Connection::open_with_flags(&db.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY);
     let conn = write.unwrap();
     let failed = conn.execute("UPDATE nodes SET extra = 'x' WHERE 1=1", []);
     assert!(failed.is_err());
+}
+
+#[test]
+fn vault_state_lists_all_named_desired_states() {
+    let db = TempDb::new("session-all-states");
+    let ids = build_session_db(&db.path);
+    let rows = run_pipeline(&db.path, "vault prod | state").unwrap();
+    let names: Vec<String> = rows
+        .iter()
+        .map(|row| s(row, "name").unwrap_or_default())
+        .collect();
+    assert_eq!(names, vec!["deploy".to_string(), "eod-2026-08-25".to_string()]);
+    assert_eq!(s(&rows[0], "id"), Some(ids.ds.to_string()));
+    assert_eq!(s(&rows[1], "id"), Some(ids.eod.to_string()));
+    assert_eq!(rows[0].get("state_version"), Value::Int(3));
+    assert_eq!(rows[1].get("state_version"), Value::Int(2));
+    // Subject is the vault node.
+    assert!(rows.iter().all(|row| s(row, "path").as_deref() == Some("prod")));
+    let fields = hedron_core::hql::fields_of(&rows);
+    assert!(fields.iter().any(|f| f == "name"));
+    assert!(!fields.iter().any(|f| f == "spec" || f == "status"));
+
+    let one = run_pipeline(&db.path, "vault prod | state eod-2026-08-25").unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(s(&one[0], "id"), Some(ids.eod.to_string()));
+    assert!(run_pipeline(&db.path, "vault prod | state no-such")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn agent_state_selects_desired_state_named_after_agent() {
+    let db = TempDb::new("session-agent-state");
+    let ids = build_session_db(&db.path);
+    let rows = run_pipeline(&db.path, "vault prod | agent deploy | state").unwrap();
+    assert_eq!(rows.len(), 1, "agent deploy selects only the DS named deploy");
+    assert_eq!(s(&rows[0], "name").as_deref(), Some("deploy"));
+    assert_eq!(s(&rows[0], "id"), Some(ids.ds.to_string()));
+    assert_eq!(s(&rows[0], "path").as_deref(), Some("deploy"));
+
+    // No desired state is named after the title-only agent.
+    assert!(run_pipeline(&db.path, "vault prod | agent ops | state")
+        .unwrap()
+        .is_empty());
+    // ...but an explicit name still works under that agent.
+    let explicit = run_pipeline(&db.path, "vault prod | agent ops | state deploy").unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(s(&explicit[0], "path").as_deref(), Some("agents/ops"));
+    assert_eq!(s(&explicit[0], "id"), Some(ids.ds.to_string()));
+}
+
+#[test]
+fn state_name_works_without_agent_or_vault_node() {
+    let db = TempDb::new("session-state-no-subject");
+    let ids = build_session_db(&db.path);
+    let rows = run_pipeline(
+        &db.path,
+        r#"vault prod | filter path ^= "notes/" | state deploy"#,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("path"), Value::Null, "no subject node");
+    assert_eq!(s(&rows[0], "name").as_deref(), Some("deploy"));
+    assert_eq!(s(&rows[0], "id"), Some(ids.ds.to_string()));
+    assert!(matches!(rows[0], hedron_core::hql::Row::State { subject: None, .. }));
+
+    let history = run_pipeline(
+        &db.path,
+        r#"vault prod | filter path ^= "notes/" | history deploy"#,
+    )
+    .unwrap();
+    let event_ids: Vec<String> = history
+        .iter()
+        .map(|row| s(row, "id").unwrap_or_default())
+        .collect();
+    assert_eq!(event_ids, vec![ids.ev1.to_string(), ids.ev2.to_string()]);
+}
+
+#[test]
+fn state_rows_carry_no_event_fields() {
+    let db = TempDb::new("session-state-no-events");
+    build_session_db(&db.path);
+    let rows = run_pipeline(
+        &db.path,
+        "vault prod | agent deploy | state | select ts, actor, caused_by, supersedes, reconciles, name",
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    for field in ["ts", "actor", "caused_by", "supersedes", "reconciles"] {
+        assert_eq!(rows[0].get(field), Value::Null, "{field} is cool-only");
+    }
+    assert_eq!(s(&rows[0], "name").as_deref(), Some("deploy"));
+}
+
+#[test]
+fn extra_is_real_yaml() {
+    let db = TempDb::new("tiny-yaml");
+    build_tiny_db(&db.path);
+    let rows = run_pipeline(
+        &db.path,
+        r#"vault demo-vault | filter path == "notes/nested.md" | select extra.tags, extra.version, extra.meta, extra.flag, extra.empty, extra.when, extra.missing"#,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(s(&rows[0], "extra.tags").as_deref(), Some("[a, b]"));
+    assert_eq!(s(&rows[0], "extra.version").as_deref(), Some("2"));
+    assert_eq!(s(&rows[0], "extra.meta").as_deref(), Some("{k: v}"));
+    assert_eq!(s(&rows[0], "extra.flag").as_deref(), Some("true"));
+    assert_eq!(rows[0].get("extra.empty"), Value::Null);
+    assert_eq!(s(&rows[0], "extra.when").as_deref(), Some("2026-08-25"));
+    assert_eq!(rows[0].get("extra.missing"), Value::Null);
 }

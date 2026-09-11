@@ -18,6 +18,7 @@ RESOLVED = "44444444-4444-4444-4444-444444444444"
 EDGE_D1 = "55555555-5555-5555-5555-555555555555"
 EDGE_D2 = "66666666-6666-6666-6666-666666666666"
 EDGE_R = "77777777-7777-7777-7777-777777777777"
+NESTED = "88888888-8888-8888-8888-888888888888"
 
 PIPE_FOUNDRY = (
     'vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" '
@@ -78,6 +79,16 @@ def _build_tiny_db(path: Path) -> None:
             "VALUES (?, ?, ?, NULL, ?, 'mentions', '{}')",
             (edge_id, VAULT, LATTICE, to_raw),
         )
+    conn.execute(
+        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
+        "VALUES (?, ?, 'Document', 'h', ?, 1, 'warm', 0.5, ?)",
+        (
+            NESTED,
+            VAULT,
+            "notes/nested.md",
+            "tags:\n- a\n- b\nversion: 2\nmeta:\n  k: v\nflag: true\nempty: ~\nwhen: 2026-08-25\n",
+        ),
+    )
     conn.execute(
         "INSERT INTO edges (id, vault_id, from_id, to_id, to_raw, type, properties) "
         "VALUES (?, ?, ?, ?, 'hedron-foundry', 'mentions', '{}')",
@@ -150,6 +161,21 @@ class HqlPipesTest(unittest.TestCase):
             .run()
         )
         self.assertEqual([row["path"] for row in rows], ["inbox/hedron-foundry.md"])
+
+    def test_extra_is_real_yaml(self) -> None:
+        rows = run_pipeline(
+            self.db,
+            'vault demo-vault | filter path == "notes/nested.md" '
+            "| select extra.tags, extra.version, extra.meta, extra.flag, extra.empty, extra.when, extra.missing",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["extra.tags"], "[a, b]")
+        self.assertEqual(rows[0]["extra.version"], "2")
+        self.assertEqual(rows[0]["extra.meta"], "{k: v}")
+        self.assertEqual(rows[0]["extra.flag"], "true")
+        self.assertIsNone(rows[0]["extra.empty"])
+        self.assertEqual(rows[0]["extra.when"], "2026-08-25")
+        self.assertIsNone(rows[0]["extra.missing"])
 
 
 if __name__ == "__main__":

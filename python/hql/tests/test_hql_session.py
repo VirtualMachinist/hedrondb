@@ -17,8 +17,10 @@ VAULT = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 AGENT = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 DOC = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 DS = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+EOD = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
 EVENT = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 EVENT2 = "99999999-9999-9999-9999-999999999999"
+EVENT3 = "88888888-8888-8888-8888-888888888888"
 
 PIPE_SESSION = (
     "vault prod | agent deploy | state | "
@@ -65,6 +67,18 @@ def _build_session_db(path: Path) -> None:
         "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) "
         "VALUES (?, ?, 2, ?, 'Reconciled', 'raw_event_payload', '[]', ?, ?)",
         (EVENT2, VAULT, AGENT, DS, f"{DS}@2"),
+    )
+    # A second named intent in the same vault.
+    conn.execute(
+        "INSERT INTO desired_states "
+        "(id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) "
+        "VALUES (?, ?, 'eod-2026-08-25', 2, 'h2', 3, ?, 0.4, ?, ?)",
+        (EOD, VAULT, AGENT, SPEC, "conditions:\n- type: Pending\n"),
+    )
+    conn.execute(
+        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) "
+        "VALUES (?, ?, 3, ?, 'Reconciled', '{}', '[]', ?, ?)",
+        (EVENT3, VAULT, AGENT, EOD, f"{EOD}@1"),
     )
     conn.commit()
     conn.close()
@@ -201,6 +215,30 @@ class HqlSessionTest(unittest.TestCase):
         self.assertEqual(rows[0]["id"], piped[0]["id"])
         self.assertEqual(rows[0]["ts"], piped[0]["ts"])
         self.assertEqual(rows[1]["id"], piped[1]["id"])
+
+    def test_vault_state_lists_all_named_desired_states(self) -> None:
+        rows = run_pipeline(self.db, "vault prod | state")
+        self.assertEqual([row["name"] for row in rows], ["deploy", "eod-2026-08-25"])
+        self.assertEqual([row["id"] for row in rows], [DS, EOD])
+        self.assertTrue(all(row["path"] == "prod" for row in rows))
+        one = run_pipeline(self.db, "vault prod | state eod-2026-08-25")
+        self.assertEqual([row["id"] for row in one], [EOD])
+        self.assertEqual(run_pipeline(self.db, "vault prod | state no-such"), [])
+
+    def test_agent_state_selects_desired_state_named_after_agent(self) -> None:
+        rows = run_pipeline(self.db, "vault prod | agent deploy | state")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "deploy")
+        self.assertEqual(rows[0]["id"], DS)
+
+    def test_state_name_works_without_agent_or_vault_node(self) -> None:
+        rows = run_pipeline(self.db, 'vault prod | filter path ^= "notes/" | state deploy')
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["path"])
+        self.assertEqual(rows[0]["id"], DS)
+        history = run_pipeline(self.db, 'vault prod | filter path ^= "notes/" | history deploy')
+        self.assertEqual([row["id"] for row in history], [EVENT, EVENT2])
+        self.assertTrue(all(row["name"] is None for row in history))
 
     def test_cli_session_pipe(self) -> None:
         buf = io.StringIO()

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::error::{Error, Result};
-use crate::hql::row::{parse_extra_map, DesiredStateView, HistoryEventView, Row};
+use crate::hql::row::{parse_extra, DesiredStateView, EdgeView, HistoryEventView, NodeView};
 use crate::store::{Store, SCHEMA_SQL};
 use crate::types::Event;
 use uuid::Uuid;
@@ -74,16 +74,6 @@ fn split_top_level(body: &str) -> Vec<&str> {
     pieces
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct EdgeRec {
-    pub id: String,
-    pub from_id: String,
-    pub to_id: Option<String>,
-    pub to_raw: Option<String>,
-    pub edge_type: String,
-    pub properties: String,
-}
-
 /// Read-only sqlite handle. Never migrate; report schema drift only.
 pub struct RoStore {
     conn: Connection,
@@ -146,35 +136,33 @@ impl RoStore {
         Ok(mismatches)
     }
 
-    pub fn nodes(&self) -> Result<Vec<Row>> {
+    pub fn nodes(&self) -> Result<Vec<NodeView>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, vault_id, type, path, extra FROM nodes")?;
         let rows = stmt.query_map([], |row| {
             let extra: Option<String> = row.get(4)?;
             let extra = extra.unwrap_or_default();
-            let extra_map = parse_extra_map(Some(&extra));
-            Ok(Row {
-                path: row.get(3)?,
-                extra,
-                extra_map,
-                node_id: row.get(0)?,
+            Ok(NodeView {
+                id: row.get(0)?,
                 vault_id: row.get(1)?,
                 node_type: row.get(2)?,
-                ..Row::default()
+                path: row.get(3)?,
+                extra_map: parse_extra(&extra),
+                extra,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Error::from)
     }
 
-    pub(crate) fn edges(&self) -> Result<Vec<EdgeRec>> {
+    pub fn edges(&self) -> Result<Vec<EdgeView>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, vault_id, from_id, to_id, to_raw, type, properties FROM edges")?;
         let rows = stmt.query_map([], |row| {
             let properties: Option<String> = row.get(6)?;
-            Ok(EdgeRec {
+            Ok(EdgeView {
                 id: row.get(0)?,
                 from_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 to_id: row.get(3)?,
@@ -187,40 +175,33 @@ impl RoStore {
             .map_err(Error::from)
     }
 
-    /// Warm path: newest desired_states row per vault_id. Never reads events.
-    pub fn latest_desired_states(&self) -> Result<HashMap<String, DesiredStateView>> {
+    /// Warm path: every named desired state, ordered by vault then name.
+    /// Never reads events.
+    pub fn desired_states(&self) -> Result<Vec<DesiredStateView>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, vault_id, state_version, reconciled_by, importance, spec, status \
-             FROM desired_states",
+            "SELECT id, vault_id, name, state_version, reconciled_by, importance, spec, status \
+             FROM desired_states ORDER BY vault_id ASC, name ASC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let spec: Option<String> = row.get(5)?;
-            let status: Option<String> = row.get(6)?;
+            let spec: Option<String> = row.get(6)?;
+            let status: Option<String> = row.get(7)?;
             Ok(DesiredStateView {
                 id: row.get(0)?,
                 vault_id: row.get(1)?,
-                state_version: row.get(2)?,
-                reconciled_by: row.get(3)?,
-                importance: row.get(4)?,
+                name: row.get(2)?,
+                state_version: row.get(3)?,
+                reconciled_by: row.get(4)?,
+                importance: row.get(5)?,
                 spec: spec.unwrap_or_default(),
                 status: status.unwrap_or_default(),
             })
         })?;
-        let mut latest: HashMap<String, DesiredStateView> = HashMap::new();
-        for row in rows {
-            let row = row?;
-            if let Some(prev) = latest.get(&row.vault_id) {
-                if row.state_version <= prev.state_version {
-                    continue;
-                }
-            }
-            latest.insert(row.vault_id.clone(), row);
-        }
-        Ok(latest)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
     }
 
-    /// Cool path: `Store::causal_chain` event rows for one Desired State.
-    /// Drops `data`; does not return spec vs status.
+    /// Cool path: events with `reconciles = desired_state_id`, `ts ASC, id ASC`.
+    /// Drops `data`; never returns spec vs status.
     pub fn causal_chain(&self, desired_state_id: &str) -> Result<Vec<HistoryEventView>> {
         let id =
             Uuid::parse_str(desired_state_id).map_err(|err| Error::Invalid(err.to_string()))?;
@@ -243,7 +224,7 @@ impl RoStore {
         let mut ids = Vec::new();
         for row in rows {
             let (id, path, extra) = row?;
-            let extra_map = parse_extra_map(Some(&extra));
+            let extra_map = parse_extra(&extra);
             let extra_name = extra_map.get("name").and_then(|v| v.as_deref());
             if path.as_deref() == Some(name) || extra_name == Some(name) {
                 ids.push(id);
