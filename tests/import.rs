@@ -274,3 +274,101 @@ fn import_hal_comment_without_yaml_fence_leaves_extra_empty() {
         .unwrap();
     assert_eq!(events, 0, "HAL supersedes must not become Event.supersedes");
 }
+
+#[test]
+fn import_rolls_back_leaving_no_half_graph() {
+    let src = TempTree::new("src-rollback");
+    fs::write(
+        src.path.join("alpha.md"),
+        "---\nname: Alpha\n---\nSee [[beta]].\n",
+    )
+    .unwrap();
+    fs::write(
+        src.path.join("beta.md"),
+        "---\nname: Beta\n---\nBody.\n",
+    )
+    .unwrap();
+
+    let out = TempTree::new("out-rollback");
+    let db = out.path.join("store.db");
+    let result = Command::new(env!("CARGO_BIN_EXE_hedron-import"))
+        .env("HEDRON_IMPORT_TEST_ROLLBACK", "1")
+        .args([
+            "--src",
+            src.path.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--vault",
+            "fixture",
+            "--agent",
+            "importer",
+        ])
+        .output()
+        .expect("run hedron-import");
+
+    assert!(
+        !result.status.success(),
+        "import should fail on rollback test hook"
+    );
+
+    let conn = Connection::open(&db).unwrap();
+    let nodes: i64 = conn
+        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+        .unwrap();
+    let edges: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(nodes, 0, "rolled-back import must leave no nodes");
+    assert_eq!(edges, 0, "rolled-back import must leave no edges");
+}
+
+#[test]
+fn import_briefs_date_writes_docs_eod_named_state() {
+    let src = TempTree::new("src-briefs");
+    fs::create_dir_all(src.path.join("inbox")).unwrap();
+    fs::write(
+        src.path.join("inbox/alpha.md"),
+        "---\nbrief: alpha\ndate: 2026-09-11\n---\nBody.\n",
+    )
+    .unwrap();
+
+    let out = TempTree::new("out-briefs");
+    let db = out.path.join("store.db");
+    let result = Command::new(env!("CARGO_BIN_EXE_hedron-import"))
+        .args([
+            "--src",
+            src.path.to_str().unwrap(),
+            "--db",
+            db.to_str().unwrap(),
+            "--vault",
+            "fixture",
+            "--agent",
+            "importer",
+            "--briefs-date",
+            "2026-09-11",
+        ])
+        .output()
+        .expect("run hedron-import");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "import failed: {stderr}{stdout}");
+
+    let conn = Connection::open(&db).unwrap();
+    let (name, spec): (String, String) = conn
+        .query_row(
+            "SELECT name, spec FROM desired_states LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(name, "eod-2026-09-11");
+    assert!(
+        spec.contains("kind: docs_eod"),
+        "spec must include kind docs_eod: {spec}"
+    );
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(events, 1, "reconcile-only import should append one event");
+}
