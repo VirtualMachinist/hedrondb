@@ -8,56 +8,8 @@ import unittest
 from pathlib import Path
 
 from hql.query import Query, run_pipeline
-from hql.store import Store
+from hql.store import Store, schema_sql
 
-SCHEMA = """
-CREATE TABLE nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
-
-CREATE TABLE edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-
-CREATE TABLE desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-"""
 
 VAULT = "11111111-1111-1111-1111-111111111111"
 FOUNDRY = "22222222-2222-2222-2222-222222222222"
@@ -83,7 +35,8 @@ PIPE_RESOLVED = (
 
 def _build_tiny_db(path: Path) -> None:
     conn = sqlite3.connect(path)
-    conn.executescript(SCHEMA)
+    # Fixtures execute the crate schema.sql, never a private copy.
+    conn.executescript(schema_sql())
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
         "VALUES (?, ?, 'Vault', 'h', ?, 1, 'cool', 1.0, ?)",

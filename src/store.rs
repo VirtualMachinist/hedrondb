@@ -12,54 +12,10 @@ use crate::types::{
     NodeType, Status, Tier, CAUSAL_CAUSED_BY, CAUSAL_RECONCILES, CAUSAL_SUPERSEDES, EDGE_GRANT,
 };
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-";
+/// Schema source: crate-root `schema.sql` (a copy of vault `store.sql`).
+/// One file; `Store`, `RoStore`, tests and the Python twin all derive from it.
+/// Never migrate an old file — `RoStore::schema_mismatches` reports drift.
+pub const SCHEMA_SQL: &str = include_str!("../schema.sql");
 
 #[derive(Clone)]
 struct Session {
@@ -79,7 +35,7 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path)?;
         lock_store_mode(&path)?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_SQL)?;
         Ok(Self {
             conn,
             path,
@@ -403,9 +359,11 @@ impl Store {
 
     fn insert_desired_state(&self, ds: &DesiredState) -> Result<()> {
         self.conn.execute(
+            // C0: `name` is NOT NULL in schema.sql but the write model is still
+            // id-addressed; the id stands in until named intents land (C1).
             "INSERT INTO desired_states
-             (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status)
+             VALUES (?1, ?2, ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 ds.id.to_string(),
                 ds.vault_id.to_string(),
