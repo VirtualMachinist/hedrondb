@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hedron_core::{ConditionKind, DesiredState, Edge, Error, Node, Store, CAUSAL_SUPERSEDES};
@@ -223,13 +223,35 @@ fn store_file_is_mode_0600() {
     assert_eq!(mode, 0o600);
 }
 
+/// Every `.rs` under `src/`, recursing into `hql/` and `bin/`.
+fn crate_source_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(Path::new("src"), &mut out);
+    out.sort();
+    out
+}
+
 #[test]
 fn crate_sources_stay_sync_and_local() {
-    for entry in fs::read_dir("src").unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
+    let files = crate_source_files();
+    // The walk must reach the nested modules or the hold is hollow.
+    for must_see in ["src/hql/mod.rs", "src/bin/hedron.rs"] {
+        assert!(
+            files.iter().any(|p| p == Path::new(must_see)),
+            "source walk missed {must_see}"
+        );
+    }
+    for path in files {
         let src = fs::read_to_string(&path).unwrap();
         for part in ["tok", "pyo", "TcpL", "TcpS", "std::n"] {
             let needle = match part {
@@ -246,5 +268,17 @@ fn crate_sources_stay_sync_and_local() {
                 path.display()
             );
         }
+    }
+}
+
+#[test]
+fn crate_sources_stay_under_1000_lines() {
+    for path in crate_source_files() {
+        let lines = fs::read_to_string(&path).unwrap().lines().count();
+        assert!(
+            lines <= 1000,
+            "{} is {lines} lines; split it (limit 1000)",
+            path.display()
+        );
     }
 }

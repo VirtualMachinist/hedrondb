@@ -13,51 +13,8 @@ use rusqlite::Connection;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const SCHEMA: &str = "
-CREATE TABLE nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
-CREATE TABLE edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-CREATE TABLE desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-";
+/// Fixtures execute the crate `schema.sql`, never a private copy.
+const SCHEMA: &str = hedron_core::SCHEMA_SQL;
 
 const PIPE_FOUNDRY: &str = r#"vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
 const PIPE_DANGLING: &str = r#"vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
@@ -178,16 +135,16 @@ fn build_session_db(path: &Path) {
     .unwrap();
     conn.execute(
         "INSERT INTO desired_states \
-         (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES ('dddddddd-dddd-dddd-dddd-dddddddddddd', ?1, 1, 'h1', NULL, NULL, 0.5, \
+         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
+         VALUES ('dddddddd-dddd-dddd-dddd-dddddddddddd', ?1, 'deploy-v1', 1, 'h1', NULL, NULL, 0.5, \
          'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Pending\n')",
         [vault],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO desired_states \
-         (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', ?1, 2, 'h2', 1, ?2, 0.8, \
+         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
+         VALUES ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', ?1, 'deploy', 2, 'h2', 1, ?2, 0.8, \
          'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Reconciled\n')",
         [vault, agent],
     )

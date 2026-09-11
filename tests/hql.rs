@@ -9,54 +9,8 @@ use rusqlite::Connection;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const SCHEMA: &str = "
-CREATE TABLE nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
-
-CREATE TABLE edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-
-CREATE TABLE desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-";
+/// Fixtures execute the crate `schema.sql`, never a private copy.
+const SCHEMA: &str = hedron_core::SCHEMA_SQL;
 
 const VAULT_PIPE: &str = "11111111-1111-1111-1111-111111111111";
 const FOUNDRY: &str = "22222222-2222-2222-2222-222222222222";
@@ -189,15 +143,15 @@ fn build_session_db(path: &std::path::Path) {
     .unwrap();
     conn.execute(
         "INSERT INTO desired_states \
-         (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES (?1, ?2, 1, 'h1', NULL, NULL, 0.5, ?3, ?4)",
+         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
+         VALUES (?1, ?2, 'deploy-v1', 1, 'h1', NULL, NULL, 0.5, ?3, ?4)",
         rusqlite::params![DS_V1, VAULT_SESSION, SPEC, STATUS_V1],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO desired_states \
-         (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES (?1, ?2, 2, 'h2', 1, ?3, 0.8, ?4, ?5)",
+         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
+         VALUES (?1, ?2, 'deploy', 2, 'h2', 1, ?3, 0.8, ?4, ?5)",
         rusqlite::params![DS_V2, VAULT_SESSION, AGENT, SPEC, STATUS_V2],
     )
     .unwrap();
