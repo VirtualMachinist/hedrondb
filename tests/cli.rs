@@ -115,9 +115,9 @@ fn hedron_hql_quoted_history_pipeline() {
     let db = out_dir.path.join("elio.db");
     let mut store = Store::open(&db).unwrap();
     let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
-    let spec = DesiredState::briefs_spec("2026-08-25", &["eli"]).unwrap();
+    let spec = DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap();
     let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
-    let doc = Node::brief_document(boot.vault.id, "eli", "2026-08-25").unwrap();
+    let doc = Node::brief_document(boot.vault.id, "alpha", "2026-08-25").unwrap();
     store.put_node(&boot.token, doc).unwrap();
     let (_, event) = store.reconcile(&boot.token, ds.id).unwrap();
     drop(store);

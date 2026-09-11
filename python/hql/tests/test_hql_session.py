@@ -76,7 +76,7 @@ PIPE_SESSION = (
 
 STATUS_V1 = "conditions:\n- type: Pending\n"
 STATUS_V2 = "conditions:\n- type: Reconciled\n"
-SPEC = "date: 2026-08-25\nrequired_briefs:\n- eli\n"
+SPEC = "date: 2026-08-25\nrequired_briefs:\n- alpha\n"
 
 
 def _build_session_db(path: Path) -> None:

@@ -25,7 +25,7 @@ from hql import Query
 
 rows = (
     Query.open("store.db")
-    .vault("atrium-fixture")
+    .vault("demo-vault")
     .search("HedronDB")
     .filter('extra.domain == "foundry"')
     .select("path", "extra.name")
@@ -72,12 +72,12 @@ H.TEC agent files often set `extra.title` and omit `extra.name`. `agent` accepts
 either. `state` is Warm only (`current_state`). `history` is Cool only
 (`causal_chain`). `causal` is rejected.
 
-## Example pipes (citadel 2026-08-25)
+## Example pipes
 
 ```text
-vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
-vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
-vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path
+vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
+vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
+vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path
 vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
 vault htec-elio | agent elio | history
 ```

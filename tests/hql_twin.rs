@@ -59,9 +59,9 @@ CREATE TABLE events (
 );
 ";
 
-const PIPE_FOUNDRY: &str = r#"vault atrium-fixture | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
-const PIPE_DANGLING: &str = r#"vault atrium-fixture | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
-const PIPE_RESOLVED: &str = r#"vault atrium-fixture | filter path ^= "mail_room/" && path !^= "mail_room/Uri/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"#;
+const PIPE_FOUNDRY: &str = r#"vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20"#;
+const PIPE_DANGLING: &str = r#"vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
+const PIPE_RESOLVED: &str = r#"vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"#;
 const PIPE_SESSION: &str =
     "vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status";
 const PIPE_AGENT_STATE: &str = "agent leo | state | select path, extra.title, state_version, status, id, reconciled_by, importance";
@@ -108,13 +108,13 @@ fn build_tiny_db(path: &Path) {
     let resolved = "44444444-4444-4444-4444-444444444444";
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?1, 'Vault', 'h', 'atrium-fixture', 1, 'cool', 1.0, 'name: atrium-fixture\n')",
+         VALUES (?1, ?1, 'Vault', 'h', 'demo-vault', 1, 'cool', 1.0, 'name: demo-vault\n')",
         [vault],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?2, 'Document', 'h', 'mail_room/hedron-foundry.md', 1, 'warm', 0.5, \
+         VALUES (?1, ?2, 'Document', 'h', 'inbox/hedron-foundry.md', 1, 'warm', 0.5, \
          'name: HedronDB kernel notes\ndomain: foundry\n')",
         [foundry, vault],
     )
@@ -128,7 +128,7 @@ fn build_tiny_db(path: &Path) {
     .unwrap();
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?2, 'Document', 'h', 'mail_room/resolved-mention.md', 1, 'warm', 0.5, \
+         VALUES (?1, ?2, 'Document', 'h', 'inbox/resolved-mention.md', 1, 'warm', 0.5, \
          'name: resolved mention note\n')",
         [resolved, vault],
     )
@@ -180,7 +180,7 @@ fn build_session_db(path: &Path) {
         "INSERT INTO desired_states \
          (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
          VALUES ('dddddddd-dddd-dddd-dddd-dddddddddddd', ?1, 1, 'h1', NULL, NULL, 0.5, \
-         'date: 2026-08-25\nrequired_briefs:\n- eli\n', 'conditions:\n- type: Pending\n')",
+         'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Pending\n')",
         [vault],
     )
     .unwrap();
@@ -188,7 +188,7 @@ fn build_session_db(path: &Path) {
         "INSERT INTO desired_states \
          (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
          VALUES ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', ?1, 2, 'h2', 1, ?2, 0.8, \
-         'date: 2026-08-25\nrequired_briefs:\n- eli\n', 'conditions:\n- type: Reconciled\n')",
+         'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Reconciled\n')",
         [vault, agent],
     )
     .unwrap();
@@ -297,7 +297,7 @@ fn assert_twins(db: &Path, pipeline: &str) {
 }
 
 #[test]
-fn rust_and_python_agree_on_citadel_pipes() {
+fn rust_and_python_agree_on_demo_vault_pipes() {
     let db = TempDb::new("pipes");
     build_tiny_db(&db.path);
     for pipeline in [PIPE_FOUNDRY, PIPE_DANGLING, PIPE_RESOLVED] {
