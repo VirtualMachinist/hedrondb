@@ -35,8 +35,8 @@ rows = (
 
 session = (
     Query.open("store.db")
-    .vault("htec-leo")
-    .agent("leo")
+    .vault("prod")
+    .agent("deploy")
     .state()
     .select("path", "extra.name", "extra.title", "state_version", "status")
     .run()
@@ -44,8 +44,8 @@ session = (
 
 chain = (
     Query.open("store.db")
-    .vault("htec-elio")
-    .agent("elio")
+    .vault("prod")
+    .agent("deploy")
     .history()
     .run()
 )
@@ -78,8 +78,8 @@ either. `state` is Warm only (`current_state`). `history` is Cool only
 vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
 vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
 vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path
-vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
-vault htec-elio | agent elio | history
+vault prod | agent deploy | state | select path, extra.name, extra.title, state_version, status
+vault prod | agent deploy | history
 ```
 
 ## Tests

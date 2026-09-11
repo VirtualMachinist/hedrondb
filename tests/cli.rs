@@ -112,9 +112,9 @@ fn hedron_import_subcommand_matches_alias() {
 #[test]
 fn hedron_hql_quoted_history_pipeline() {
     let out_dir = TempTree::new("history-db");
-    let db = out_dir.path.join("elio.db");
+    let db = out_dir.path.join("history.db");
     let mut store = Store::open(&db).unwrap();
-    let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
+    let boot = store.bootstrap("prod", "deploy", "agents/deploy").unwrap();
     let spec = DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap();
     let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
     let doc = Node::brief_document(boot.vault.id, "alpha", "2026-08-25").unwrap();
@@ -129,7 +129,7 @@ fn hedron_hql_quoted_history_pipeline() {
             db.to_str().unwrap(),
             "--format",
             "json",
-            "vault htec-elio | agent elio | history",
+            "vault prod | agent deploy | history",
         ])
         .output()
         .expect("hedron hql history");
