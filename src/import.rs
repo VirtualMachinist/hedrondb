@@ -151,9 +151,9 @@ pub fn run(args: ImportArgs) -> Result<(), String> {
             inbox
         };
         let briefs: Vec<&str> = source.iter().map(|doc| doc.stem.as_str()).collect();
-        let spec = DesiredState::briefs_spec(date, &briefs).map_err(err_str)?;
+        let spec = DesiredState::docs_eod_spec(date, &briefs).map_err(err_str)?;
         let ds = store
-            .put_desired_state(&token, spec, 0.5)
+            .put_desired_state(&token, &format!("eod-{date}"), spec, 0.5)
             .map_err(err_str)?;
         store.observe(&token, ds.id).map_err(err_str)?;
         store.reconcile(&token, ds.id).map_err(err_str)?;

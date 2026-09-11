@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use hedron_core::{DesiredState, Node, NodeType, Store, Tier};
 use rusqlite::Connection;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -110,59 +111,39 @@ fn build_tiny_db(path: &Path) {
     .unwrap();
 }
 
+/// Session fixture built through `Store` (same shape as `tests/hql.rs`):
+/// one desired state named `deploy`, reconciled twice.
 fn build_session_db(path: &Path) {
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(SCHEMA).unwrap();
-    let vault = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    let agent = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-    conn.execute(
-        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?1, 'Vault', 'h', 'prod', 1, 'cool', 1.0, 'name: prod\n')",
-        [vault],
+    let mut store = Store::open(path).unwrap();
+    let boot = store.bootstrap("prod", "deploy", "agents/deploy").unwrap();
+    let token = boot.token;
+    let vault_id = boot.vault.id;
+    let hello = Node::document(
+        vault_id,
+        Some("notes/hello.md"),
+        serde_yaml::from_str("name: hello\n").unwrap(),
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?2, 'Agent', 'h', 'agents/deploy', 1, 'hot', 1.0, 'title: deploy\n')",
-        [agent, vault],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES ('cccccccc-cccc-cccc-cccc-cccccccccccc', ?1, 'Document', 'h', 'notes/hello.md', 1, 'warm', 0.5, 'name: hello\n')",
-        [vault],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO desired_states \
-         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES ('dddddddd-dddd-dddd-dddd-dddddddddddd', ?1, 'deploy-v1', 1, 'h1', NULL, NULL, 0.5, \
-         'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Pending\n')",
-        [vault],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO desired_states \
-         (id, vault_id, name, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status) \
-         VALUES ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', ?1, 'deploy', 2, 'h2', 1, ?2, 0.8, \
-         'date: 2026-08-25\nrequired_briefs:\n- alpha\n', 'conditions:\n- type: Reconciled\n')",
-        [vault, agent],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) \
-         VALUES ('ffffffff-ffff-ffff-ffff-ffffffffffff', ?1, 1, ?2, 'Reconciled', 'hdt_must_not_print', '[]', \
-         'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'dddddddd-dddd-dddd-dddd-dddddddddddd@1')",
-        [vault, agent],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO events (id, vault_id, ts, actor, type, data, caused_by, reconciles, supersedes) \
-         VALUES ('99999999-9999-9999-9999-999999999999', ?1, 2, ?2, 'Reconciled', 'raw_event_payload', '[]', \
-         'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee@2')",
-        [vault, agent],
-    )
-    .unwrap();
+    store.put_node(&token, hello).unwrap();
+    let ops = Node {
+        node_type: NodeType::Agent,
+        tier: Tier::Hot,
+        importance: 1.0,
+        htec_path: Some("agents/ops".into()),
+        ..Node::document(
+            vault_id,
+            Some("agents/ops"),
+            serde_yaml::from_str("title: ops\n").unwrap(),
+        )
+        .unwrap()
+    };
+    store.put_node(&token, ops).unwrap();
+    let spec = DesiredState::docs_eod_spec("2026-08-25", &["alpha"]).unwrap();
+    let ds = store.put_desired_state(&token, "deploy", spec, 0.8).unwrap();
+    store.reconcile(&token, ds.id).unwrap();
+    let alpha = Node::brief_document(vault_id, "alpha", "2026-08-25").unwrap();
+    store.put_node(&token, alpha).unwrap();
+    store.reconcile(&token, ds.id).unwrap();
 }
 
 fn run_hedron_hql(db: &Path, pipeline: &str) -> String {
