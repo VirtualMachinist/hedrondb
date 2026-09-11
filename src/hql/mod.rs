@@ -1,71 +1,35 @@
 //! HQL v0 read-only pipes. Opens the store read-only; never writes.
+//!
+//! This module is the `Query` builder and pipeline parser. Operators live in
+//! `ops`, typed rows in `row`, the CLI and writers in `cli`.
 
+pub mod cli;
 mod expr;
+mod ops;
 mod row;
 mod store;
 
-use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::collections::HashMap;
 use std::path::Path;
 
+pub use cli::{fields_of, run_cli, write_output, OutputFormat, HQL_HELP};
 pub use expr::{parse_filter, Comparison, FilterExpr};
 pub use row::{
-    default_history_fields, default_output_fields, parse_extra_map, DesiredStateView,
-    HistoryEventView, Row, Value,
+    default_history_fields, default_output_fields, default_state_fields, parse_extra,
+    DesiredStateView, EdgeView, ExtraMap, HistoryEventView, NodeView, Row, Value,
 };
 pub use store::RoStore;
 
 use crate::error::{Error, Result};
-use crate::hql::store::EdgeRec;
-
-pub const HQL_HELP: &str = "\
-Run a read-only HQL v0 pipeline.
-
-Usage:
-  hedron hql --db FILE [--format tsv|table|json] PIPELINE
-
-Opens the store read-only (never writes). Quote the pipeline so the
-shell is not the parser.
-
-Options:
-  --db FILE              HedronDB sqlite file
-  --format tsv|table|json
-                         Output format (default tsv)
-  -h, --help             Print help
-
-Operators: vault, agent, state, history, search, traverse, filter, select, limit.
-`causal` is rejected. `state` is Warm (latest spec/status). `history` is Cool
-(causal_chain only). Default columns hide spec/status unless selected.
-
-Python `python/hql` is a result-twin of this command.
-";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputFormat {
-    Tsv,
-    Table,
-    Json,
-}
-
-impl OutputFormat {
-    fn parse(raw: &str) -> Result<Self> {
-        match raw {
-            "tsv" => Ok(Self::Tsv),
-            "table" => Ok(Self::Table),
-            "json" => Ok(Self::Json),
-            other => Err(Error::Invalid(format!(
-                "unknown format {other:?} (expected tsv, table, or json)"
-            ))),
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 enum Op {
     Vault(String),
     Agent(String),
-    State,
-    History,
+    /// `state` (all named desired states in scope) or `state NAME`.
+    State(Option<String>),
+    /// `history` / `history NAME`: causal events of the same selection.
+    History(Option<String>),
     Search(String),
     Traverse { edge: String, hops: i64 },
     Filter(String),
@@ -96,13 +60,24 @@ impl Query {
         self
     }
 
+    /// Every named desired state in scope (see `state_named` for one).
     pub fn state(mut self) -> Self {
-        self.ops.push(Op::State);
+        self.ops.push(Op::State(None));
+        self
+    }
+
+    pub fn state_named(mut self, name: impl Into<String>) -> Self {
+        self.ops.push(Op::State(Some(name.into())));
         self
     }
 
     pub fn history(mut self) -> Self {
-        self.ops.push(Op::History);
+        self.ops.push(Op::History(None));
+        self
+    }
+
+    pub fn history_named(mut self, name: impl Into<String>) -> Self {
+        self.ops.push(Op::History(Some(name.into())));
         self
     }
 
@@ -151,54 +126,45 @@ impl Query {
 
     pub fn run(self) -> Result<Vec<Row>> {
         let nodes = self.store.nodes()?;
-        let edges = self.store.edges()?;
-        let mut by_id: HashMap<String, Row> = HashMap::new();
-        for row in &nodes {
-            if let Some(id) = &row.node_id {
-                by_id.insert(id.clone(), row.clone());
-            }
-        }
-        let mut outgoing: HashMap<String, Vec<EdgeRec>> = HashMap::new();
-        for edge in edges {
+        let by_id: HashMap<String, NodeView> =
+            nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
+        let mut outgoing: HashMap<String, Vec<EdgeView>> = HashMap::new();
+        for edge in self.store.edges()? {
             outgoing.entry(edge.from_id.clone()).or_default().push(edge);
         }
+        let graph = ops::Graph {
+            by_id: &by_id,
+            outgoing: &outgoing,
+        };
 
-        let mut rows = nodes;
+        let mut rows: Vec<Row> = nodes.into_iter().map(Row::Node).collect();
         for op in &self.ops {
             match op {
                 Op::Vault(name) => {
-                    let vault_ids: HashSet<String> =
-                        self.store.vault_ids_named(name)?.into_iter().collect();
+                    let vault_ids = self.store.vault_ids_named(name)?;
                     rows.retain(|row| {
-                        row.vault_id
-                            .as_ref()
-                            .map(|id| vault_ids.contains(id))
+                        row.vault_id()
+                            .map(|id| vault_ids.iter().any(|v| v == id))
                             .unwrap_or(false)
                     });
                 }
-                Op::Agent(name) => {
-                    rows = filter_agents(rows, name);
+                Op::Agent(name) => rows = ops::filter_agents(rows, name),
+                Op::State(name) => {
+                    rows = ops::apply_state(&rows, name.as_deref(), &self.store)?;
                 }
-                Op::State => {
-                    rows = apply_state(rows, &self.store.latest_desired_states()?);
+                Op::History(name) => {
+                    rows = ops::apply_history(&rows, name.as_deref(), &self.store)?;
                 }
-                Op::History => {
-                    rows = apply_history(rows, &self.store)?;
-                }
-                Op::Search(needle) => {
-                    rows.retain(|row| search_hit(row, needle, &outgoing, &by_id));
-                }
-                Op::Traverse { edge, hops } => {
-                    rows = traverse(rows, edge, *hops, &outgoing, &by_id)?;
-                }
+                Op::Search(needle) => rows.retain(|row| ops::search_hit(row, needle, &graph)),
+                Op::Traverse { edge, hops } => rows = ops::traverse(rows, edge, *hops, &graph)?,
                 Op::Filter(expr) => {
                     let expr = parse_filter(expr)?;
                     rows.retain(|row| expr.eval(row));
                 }
                 Op::Select(fields) => {
-                    rows = rows.into_iter().map(|row| row.project(fields)).collect();
+                    rows = rows.iter().map(|row| row.project(fields)).collect();
                 }
-                Op::Limit(n) => apply_limit(&mut rows, *n),
+                Op::Limit(n) => ops::apply_limit(&mut rows, *n),
             }
         }
         Ok(rows)
@@ -214,40 +180,22 @@ impl Query {
             None => (stage, ""),
         };
         match name {
-            "vault" => {
-                self.ops.push(Op::Vault(unquote_arg(rest)));
-            }
+            "vault" => self.ops.push(Op::Vault(unquote_arg(rest))),
             "agent" => {
                 if rest.is_empty() {
                     return Err(Error::Invalid("agent requires a name".into()));
                 }
                 self.ops.push(Op::Agent(unquote_arg(rest)));
             }
-            "state" => {
-                if !rest.is_empty() {
-                    return Err(Error::Invalid("state takes no arguments".into()));
-                }
-                self.ops.push(Op::State);
-            }
-            "history" => {
-                if !rest.is_empty() {
-                    return Err(Error::Invalid("history takes no arguments".into()));
-                }
-                self.ops.push(Op::History);
-            }
-            "search" => {
-                self.ops.push(Op::Search(unquote_arg(rest)));
-            }
+            "state" => self.ops.push(Op::State(optional_name(rest))),
+            "history" => self.ops.push(Op::History(optional_name(rest))),
+            "search" => self.ops.push(Op::Search(unquote_arg(rest))),
             "traverse" => {
                 let (edge, hops) = parse_traverse(rest)?;
                 self.ops.push(Op::Traverse { edge, hops });
             }
-            "filter" => {
-                self.ops.push(Op::Filter(rest.to_string()));
-            }
-            "select" => {
-                self.ops.push(Op::Select(split_fields(rest)));
-            }
+            "filter" => self.ops.push(Op::Filter(rest.to_string())),
+            "select" => self.ops.push(Op::Select(split_fields(rest))),
             "limit" => {
                 let n = rest
                     .parse::<i64>()
@@ -306,201 +254,11 @@ pub fn split_pipeline(pipeline: &str) -> Vec<String> {
     stages
 }
 
-fn search_hit(
-    row: &Row,
-    needle: &str,
-    outgoing: &HashMap<String, Vec<EdgeRec>>,
-    by_id: &HashMap<String, Row>,
-) -> bool {
-    if row.searchable_text().contains(needle) {
-        return true;
-    }
-    let source_id = row
-        .node_id
-        .as_deref()
-        .or(row.from_id.as_deref())
-        .unwrap_or("");
-    if source_id.is_empty() {
-        return false;
-    }
-    for edge in outgoing.get(source_id).map(Vec::as_slice).unwrap_or(&[]) {
-        let blob = format!(
-            "{}\n{}",
-            edge.to_raw.as_deref().unwrap_or(""),
-            edge.properties
-        );
-        if blob.contains(needle) {
-            return true;
-        }
-        if let Some(to_id) = &edge.to_id {
-            if let Some(dest) = by_id.get(to_id) {
-                if dest.searchable_text().contains(needle) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn traverse(
-    rows: Vec<Row>,
-    edge_type: &str,
-    hops: i64,
-    outgoing: &HashMap<String, Vec<EdgeRec>>,
-    by_id: &HashMap<String, Row>,
-) -> Result<Vec<Row>> {
-    if hops < 1 {
-        return Err(Error::Invalid("traverse --hops must be >= 1".into()));
-    }
-    let mut frontier: Vec<Row> = Vec::new();
-    for row in rows {
-        if row.node_id.is_some() {
-            frontier.push(row);
-        } else if let Some(to_id) = &row.to_id {
-            if let Some(dest) = by_id.get(to_id) {
-                frontier.push(dest.clone());
-            }
-        }
-    }
-    let mut emitted = Vec::new();
-    let mut seen_edges: HashSet<String> = HashSet::new();
-    for _ in 0..hops {
-        let mut nxt = Vec::new();
-        for src in &frontier {
-            let Some(src_id) = &src.node_id else {
-                continue;
-            };
-            for edge in outgoing.get(src_id).map(Vec::as_slice).unwrap_or(&[]) {
-                if edge.edge_type != edge_type {
-                    continue;
-                }
-                if !seen_edges.insert(edge.id.clone()) {
-                    continue;
-                }
-                let dest = edge.to_id.as_ref().and_then(|id| by_id.get(id));
-                let walk = Row {
-                    path: src.path.clone(),
-                    extra: src.extra.clone(),
-                    extra_map: src.extra_map.clone(),
-                    node_id: src.node_id.clone(),
-                    vault_id: src.vault_id.clone(),
-                    node_type: src.node_type.clone(),
-                    from_id: Some(edge.from_id.clone()),
-                    from_path: src.path.clone(),
-                    to_id: edge.to_id.clone(),
-                    to_raw: edge.to_raw.clone(),
-                    to_path: dest.and_then(|d| d.path.clone()),
-                    edge_type: Some(edge.edge_type.clone()),
-                    properties: edge.properties.clone(),
-                    ..Row::default()
-                };
-                emitted.push(walk);
-                if let Some(dest) = dest {
-                    nxt.push(dest.clone());
-                }
-            }
-        }
-        frontier = nxt;
-    }
-    Ok(emitted)
-}
-
-fn filter_agents(rows: Vec<Row>, name: &str) -> Vec<Row> {
-    let agents: Vec<Row> = rows
-        .into_iter()
-        .filter(|row| row.node_type.as_deref() == Some("Agent"))
-        .collect();
-    let exact: Vec<Row> = agents
-        .iter()
-        .filter(|row| agent_exact(row, name))
-        .cloned()
-        .collect();
-    if !exact.is_empty() {
-        return exact;
-    }
-    agents
-        .into_iter()
-        .filter(|row| agent_substring(row, name))
-        .collect()
-}
-
-fn agent_exact(row: &Row, name: &str) -> bool {
-    let extra_name = row.extra_map.get("name").and_then(|v| v.as_deref());
-    let extra_title = row.extra_map.get("title").and_then(|v| v.as_deref());
-    if extra_name == Some(name) || extra_title == Some(name) {
-        return true;
-    }
-    let path = row.path.as_deref().unwrap_or("");
-    if path == name {
-        return true;
-    }
-    path_basename(path) == name
-}
-
-fn agent_substring(row: &Row, name: &str) -> bool {
-    let extra_name = row
-        .extra_map
-        .get("name")
-        .and_then(|v| v.as_deref())
-        .unwrap_or("");
-    let extra_title = row
-        .extra_map
-        .get("title")
-        .and_then(|v| v.as_deref())
-        .unwrap_or("");
-    let path = row.path.as_deref().unwrap_or("");
-    extra_name.contains(name) || extra_title.contains(name) || path.contains(name)
-}
-
-fn path_basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn apply_state(rows: Vec<Row>, latest: &HashMap<String, DesiredStateView>) -> Vec<Row> {
-    let mut emitted = Vec::new();
-    for row in rows {
-        if !matches!(row.node_type.as_deref(), Some("Agent") | Some("Vault")) {
-            continue;
-        }
-        let Some(vault_id) = row.vault_id.as_deref() else {
-            continue;
-        };
-        let Some(ds) = latest.get(vault_id) else {
-            continue;
-        };
-        emitted.push(row.with_state(ds));
-    }
-    emitted
-}
-
-fn apply_history(rows: Vec<Row>, store: &RoStore) -> Result<Vec<Row>> {
-    let latest = store.latest_desired_states()?;
-    let mut emitted = Vec::new();
-    for row in rows {
-        if !matches!(row.node_type.as_deref(), Some("Agent") | Some("Vault")) {
-            continue;
-        }
-        let Some(vault_id) = row.vault_id.as_deref() else {
-            continue;
-        };
-        let Some(ds) = latest.get(vault_id) else {
-            continue;
-        };
-        for event in store.causal_chain(&ds.id)? {
-            emitted.push(Row::from_history(&event));
-        }
-    }
-    Ok(emitted)
-}
-
-fn apply_limit(rows: &mut Vec<Row>, n: i64) {
-    if n >= 0 {
-        rows.truncate((n as usize).min(rows.len()));
+fn optional_name(rest: &str) -> Option<String> {
+    if rest.is_empty() {
+        None
     } else {
-        let drop = n.unsigned_abs() as usize;
-        let keep = rows.len().saturating_sub(drop);
-        rows.truncate(keep);
+        Some(unquote_arg(rest))
     }
 }
 
@@ -578,198 +336,4 @@ fn split_fields(text: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-pub fn fields_of(rows: &[Row]) -> Vec<String> {
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    if let Some(selected) = rows[0].selected_fields() {
-        return selected;
-    }
-    default_output_fields()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
-}
-
-pub fn write_output<W: Write>(mut stream: W, format: OutputFormat, rows: &[Row]) -> io::Result<()> {
-    let fields = fields_of(rows);
-    match format {
-        OutputFormat::Json => write_json(&mut stream, &fields, rows),
-        OutputFormat::Table => write_table(&mut stream, &fields, rows),
-        OutputFormat::Tsv => write_tsv(&mut stream, &fields, rows),
-    }
-}
-
-fn write_tsv<W: Write>(stream: &mut W, fields: &[String], rows: &[Row]) -> io::Result<()> {
-    if fields.is_empty() {
-        return Ok(());
-    }
-    writeln!(stream, "{}", fields.join("\t"))?;
-    for row in rows {
-        let line: Vec<String> = fields.iter().map(|f| row.get(f).to_display()).collect();
-        writeln!(stream, "{}", line.join("\t"))?;
-    }
-    Ok(())
-}
-
-fn write_table<W: Write>(stream: &mut W, fields: &[String], rows: &[Row]) -> io::Result<()> {
-    if fields.is_empty() {
-        return Ok(());
-    }
-    let mut widths: Vec<usize> = fields.iter().map(|f| f.len()).collect();
-    let cells: Vec<Vec<String>> = rows
-        .iter()
-        .map(|row| fields.iter().map(|f| row.get(f).to_display()).collect())
-        .collect();
-    for line in &cells {
-        for (i, value) in line.iter().enumerate() {
-            widths[i] = widths[i].max(value.len());
-        }
-    }
-    let header: Vec<String> = fields
-        .iter()
-        .enumerate()
-        .map(|(i, field)| pad_right(field, widths[i]))
-        .collect();
-    writeln!(stream, "{}", header.join("  "))?;
-    for line in cells {
-        let padded: Vec<String> = line
-            .iter()
-            .enumerate()
-            .map(|(i, value)| pad_right(value, widths[i]))
-            .collect();
-        writeln!(stream, "{}", padded.join("  "))?;
-    }
-    Ok(())
-}
-
-fn pad_right(value: &str, width: usize) -> String {
-    if value.len() >= width {
-        value.to_string()
-    } else {
-        format!("{value}{}", " ".repeat(width - value.len()))
-    }
-}
-
-fn write_json<W: Write>(stream: &mut W, fields: &[String], rows: &[Row]) -> io::Result<()> {
-    stream.write_all(b"[")?;
-    for (ri, row) in rows.iter().enumerate() {
-        if ri > 0 {
-            stream.write_all(b", ")?;
-        }
-        stream.write_all(b"{")?;
-        for (fi, field) in fields.iter().enumerate() {
-            if fi > 0 {
-                stream.write_all(b", ")?;
-            }
-            write_json_string(stream, field)?;
-            stream.write_all(b": ")?;
-            write_json_value(stream, &row.get(field))?;
-        }
-        stream.write_all(b"}")?;
-    }
-    stream.write_all(b"]\n")?;
-    Ok(())
-}
-
-fn write_json_value<W: Write>(stream: &mut W, value: &Value) -> io::Result<()> {
-    match value {
-        Value::Null => stream.write_all(b"null"),
-        Value::Str(s) => write_json_string(stream, s),
-        Value::Int(n) => write!(stream, "{n}"),
-        Value::Float(f) => stream.write_all(row::format_float(*f).as_bytes()),
-    }
-}
-
-fn write_json_string<W: Write>(stream: &mut W, s: &str) -> io::Result<()> {
-    stream.write_all(b"\"")?;
-    for ch in s.chars() {
-        match ch {
-            '"' => stream.write_all(b"\\\"")?,
-            '\\' => stream.write_all(b"\\\\")?,
-            '\u{08}' => stream.write_all(b"\\b")?,
-            '\u{0c}' => stream.write_all(b"\\f")?,
-            '\n' => stream.write_all(b"\\n")?,
-            '\r' => stream.write_all(b"\\r")?,
-            '\t' => stream.write_all(b"\\t")?,
-            c if (c as u32) < 0x20 => write!(stream, "\\u{:04x}", c as u32)?,
-            c if (c as u32) > 0x7f => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    write!(stream, "\\u{:04x}", unit)?;
-                }
-            }
-            c => {
-                let mut buf = [0u8; 4];
-                stream.write_all(c.encode_utf8(&mut buf).as_bytes())?;
-            }
-        }
-    }
-    stream.write_all(b"\"")
-}
-
-struct HqlArgs {
-    db: std::path::PathBuf,
-    format: OutputFormat,
-    pipeline: String,
-}
-
-fn parse_hql_args(raw: Vec<String>) -> Result<HqlArgs> {
-    let mut db = None;
-    let mut format = OutputFormat::Tsv;
-    let mut pipeline = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        match raw[i].as_str() {
-            "--db" => {
-                db = Some(std::path::PathBuf::from(need_value(&raw, i, "--db")?));
-                i += 2;
-            }
-            "--format" => {
-                format = OutputFormat::parse(need_value(&raw, i, "--format")?)?;
-                i += 2;
-            }
-            other if other.starts_with('-') => {
-                return Err(Error::Invalid(format!("unknown argument {other}")));
-            }
-            other => {
-                pipeline.push(other.to_string());
-                i += 1;
-            }
-        }
-    }
-    let db = db.ok_or_else(|| Error::Invalid("--db FILE is required".into()))?;
-    if pipeline.is_empty() {
-        return Err(Error::Invalid("PIPELINE is required".into()));
-    }
-    Ok(HqlArgs {
-        db,
-        format,
-        pipeline: pipeline.join(" "),
-    })
-}
-
-fn need_value<'a>(raw: &'a [String], i: usize, flag: &str) -> Result<&'a str> {
-    raw.get(i + 1)
-        .map(String::as_str)
-        .ok_or_else(|| Error::Invalid(format!("{flag} needs a value")))
-}
-
-/// Parse flags, run the pipeline, write formatted rows to stdout.
-pub fn run_cli(raw: Vec<String>) -> std::result::Result<(), String> {
-    if raw.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print!("{HQL_HELP}");
-        return Ok(());
-    }
-    let args = parse_hql_args(raw).map_err(|err| err.to_string())?;
-    let rows = Query::open(&args.db)
-        .map_err(|err| err.to_string())?
-        .pipe(&args.pipeline)
-        .map_err(|err| err.to_string())?
-        .run()
-        .map_err(|err| err.to_string())?;
-    write_output(io::stdout(), args.format, &rows).map_err(|err| err.to_string())?;
-    Ok(())
 }

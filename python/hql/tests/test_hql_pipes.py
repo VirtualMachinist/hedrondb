@@ -8,56 +8,8 @@ import unittest
 from pathlib import Path
 
 from hql.query import Query, run_pipeline
-from hql.store import Store
+from hql.store import Store, schema_sql
 
-SCHEMA = """
-CREATE TABLE nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
-
-CREATE TABLE edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-
-CREATE TABLE desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-"""
 
 VAULT = "11111111-1111-1111-1111-111111111111"
 FOUNDRY = "22222222-2222-2222-2222-222222222222"
@@ -66,6 +18,7 @@ RESOLVED = "44444444-4444-4444-4444-444444444444"
 EDGE_D1 = "55555555-5555-5555-5555-555555555555"
 EDGE_D2 = "66666666-6666-6666-6666-666666666666"
 EDGE_R = "77777777-7777-7777-7777-777777777777"
+NESTED = "88888888-8888-8888-8888-888888888888"
 
 PIPE_FOUNDRY = (
     'vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" '
@@ -83,7 +36,8 @@ PIPE_RESOLVED = (
 
 def _build_tiny_db(path: Path) -> None:
     conn = sqlite3.connect(path)
-    conn.executescript(SCHEMA)
+    # Fixtures execute the crate schema.sql, never a private copy.
+    conn.executescript(schema_sql())
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
         "VALUES (?, ?, 'Vault', 'h', ?, 1, 'cool', 1.0, ?)",
@@ -125,6 +79,16 @@ def _build_tiny_db(path: Path) -> None:
             "VALUES (?, ?, ?, NULL, ?, 'mentions', '{}')",
             (edge_id, VAULT, LATTICE, to_raw),
         )
+    conn.execute(
+        "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) "
+        "VALUES (?, ?, 'Document', 'h', ?, 1, 'warm', 0.5, ?)",
+        (
+            NESTED,
+            VAULT,
+            "notes/nested.md",
+            "tags:\n- a\n- b\nversion: 2\nmeta:\n  k: v\nflag: true\nempty: ~\nwhen: 2026-08-25\n",
+        ),
+    )
     conn.execute(
         "INSERT INTO edges (id, vault_id, from_id, to_id, to_raw, type, properties) "
         "VALUES (?, ?, ?, ?, 'hedron-foundry', 'mentions', '{}')",
@@ -197,6 +161,21 @@ class HqlPipesTest(unittest.TestCase):
             .run()
         )
         self.assertEqual([row["path"] for row in rows], ["inbox/hedron-foundry.md"])
+
+    def test_extra_is_real_yaml(self) -> None:
+        rows = run_pipeline(
+            self.db,
+            'vault demo-vault | filter path == "notes/nested.md" '
+            "| select extra.tags, extra.version, extra.meta, extra.flag, extra.empty, extra.when, extra.missing",
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["extra.tags"], "[a, b]")
+        self.assertEqual(rows[0]["extra.version"], "2")
+        self.assertEqual(rows[0]["extra.meta"], "{k: v}")
+        self.assertEqual(rows[0]["extra.flag"], "true")
+        self.assertIsNone(rows[0]["extra.empty"])
+        self.assertEqual(rows[0]["extra.when"], "2026-08-25")
+        self.assertIsNone(rows[0]["extra.missing"])
 
 
 if __name__ == "__main__":

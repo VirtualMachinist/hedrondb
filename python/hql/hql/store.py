@@ -3,58 +3,75 @@
 from __future__ import annotations
 
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from hql.row import Row, parse_extra_map
+from hql.row import Row, parse_extra
 
-# Mirrors hedron-core src/store.rs SCHEMA (CREATE TABLE columns / types).
-EXPECTED_SCHEMA: dict[str, list[tuple[str, str]]] = {
-    "nodes": [
-        ("id", "TEXT"),
-        ("vault_id", "TEXT"),
-        ("type", "TEXT"),
-        ("content_hash", "TEXT"),
-        ("path", "TEXT"),
-        ("version", "INTEGER"),
-        ("tier", "TEXT"),
-        ("importance", "REAL"),
-        ("htec_path", "TEXT"),
-        ("extra", "TEXT"),
-    ],
-    "edges": [
-        ("id", "TEXT"),
-        ("vault_id", "TEXT"),
-        ("from_id", "TEXT"),
-        ("to_id", "TEXT"),
-        ("to_raw", "TEXT"),
-        ("type", "TEXT"),
-        ("properties", "TEXT"),
-    ],
-    "desired_states": [
-        ("id", "TEXT"),
-        ("vault_id", "TEXT"),
-        ("state_version", "INTEGER"),
-        ("content_hash", "TEXT"),
-        ("last_reconciled", "INTEGER"),
-        ("reconciled_by", "TEXT"),
-        ("importance", "REAL"),
-        ("spec", "TEXT"),
-        ("status", "TEXT"),
-    ],
-    "events": [
-        ("id", "TEXT"),
-        ("vault_id", "TEXT"),
-        ("ts", "INTEGER"),
-        ("actor", "TEXT"),
-        ("type", "TEXT"),
-        ("data", "TEXT"),
-        ("caused_by", "TEXT"),
-        ("reconciles", "TEXT"),
-        ("supersedes", "TEXT"),
-    ],
-}
+# Crate-root schema.sql is the only schema source (copy of vault store.sql).
+# The Python twin reads that file; it never carries its own column list.
+SCHEMA_SQL_PATH = Path(__file__).resolve().parents[3] / "schema.sql"
+
+_CONSTRAINT_KEYWORDS = {"UNIQUE", "PRIMARY", "FOREIGN", "CHECK", "CONSTRAINT"}
+
+
+def schema_sql() -> str:
+    """Contents of crate-root schema.sql (executed by Store and by fixtures)."""
+    return SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+
+
+def _split_top_level(body: str) -> list[str]:
+    """Split on commas outside parentheses so UNIQUE (a, b) stays one piece."""
+    pieces: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(body):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == "," and depth == 0:
+            pieces.append(body[start:i])
+            start = i + 1
+    pieces.append(body[start:])
+    return pieces
+
+
+def parse_schema_sql(sql: str) -> dict[str, list[tuple[str, str]]]:
+    """Table name -> (column, declared type) pairs in declaration order.
+
+    Table constraints (UNIQUE, PRIMARY KEY, ...) are not columns and are
+    skipped; `--` comments are stripped first. Mirrors the Rust reader.
+    """
+    stripped = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    tables: dict[str, list[tuple[str, str]]] = {}
+    rest = stripped
+    while True:
+        start = rest.find("CREATE TABLE")
+        if start < 0:
+            break
+        after = rest[start + len("CREATE TABLE") :]
+        open_ = after.find("(")
+        close = after.find(");")
+        if open_ < 0 or close < 0:
+            break
+        name = after[:open_].split()[-1]
+        cols: list[tuple[str, str]] = []
+        for piece in _split_top_level(after[open_ + 1 : close]):
+            words = piece.split()
+            if not words or words[0].upper() in _CONSTRAINT_KEYWORDS:
+                continue
+            cols.append((words[0], words[1] if len(words) > 1 else ""))
+        tables[name] = cols
+        rest = after[close + 2 :]
+    return tables
+
+
+@lru_cache(maxsize=1)
+def expected_schema() -> dict[str, list[tuple[str, str]]]:
+    return parse_schema_sql(schema_sql())
 
 
 class Store:
@@ -73,7 +90,8 @@ class Store:
     def schema_mismatches(self) -> list[str]:
         existing = self._table_columns()
         mismatches: list[str] = []
-        for table, cols in EXPECTED_SCHEMA.items():
+        expected = expected_schema()
+        for table, cols in expected.items():
             if table not in existing:
                 mismatches.append(f"missing table {table}")
                 continue
@@ -94,7 +112,7 @@ class Store:
         for table in existing:
             if table.startswith("sqlite_"):
                 continue
-            if table not in EXPECTED_SCHEMA:
+            if table not in expected:
                 mismatches.append(f"unexpected table {table}")
         return mismatches
 
@@ -106,7 +124,7 @@ class Store:
             Row(
                 path=row["path"],
                 extra=row["extra"] or "",
-                extra_map=parse_extra_map(row["extra"]),
+                extra_map=parse_extra(row["extra"]),
                 node_id=row["id"],
                 vault_id=row["vault_id"],
                 node_type=row["type"],
@@ -131,29 +149,25 @@ class Store:
             for row in rows
         ]
 
-    def latest_desired_states(self) -> dict[str, dict]:
-        """Warm path: newest desired_states row per vault_id. Never reads events."""
+    def desired_states(self) -> list[dict]:
+        """Warm path: every named desired state, by vault then name. Never reads events."""
         rows = self.conn.execute(
-            "SELECT id, vault_id, state_version, reconciled_by, importance, spec, status "
-            "FROM desired_states"
+            "SELECT id, vault_id, name, state_version, reconciled_by, importance, spec, status "
+            "FROM desired_states ORDER BY vault_id ASC, name ASC"
         ).fetchall()
-        latest: dict[str, dict] = {}
-        for row in rows:
-            vault_id = row["vault_id"]
-            version = int(row["state_version"])
-            prev = latest.get(vault_id)
-            if prev is not None and version <= prev["state_version"]:
-                continue
-            latest[vault_id] = {
+        return [
+            {
                 "id": row["id"],
-                "vault_id": vault_id,
-                "state_version": version,
+                "vault_id": row["vault_id"],
+                "name": row["name"],
+                "state_version": int(row["state_version"]),
                 "reconciled_by": row["reconciled_by"],
                 "importance": row["importance"],
                 "spec": row["spec"] or "",
                 "status": row["status"] or "",
             }
-        return latest
+            for row in rows
+        ]
 
     def causal_chain(self, desired_state_id: str) -> list[dict]:
         """Cool path: events that reconcile this Desired State. No spec/status/data."""
@@ -183,7 +197,7 @@ class Store:
         for row in self.conn.execute(
             "SELECT id, path, extra FROM nodes WHERE type = 'Vault'"
         ).fetchall():
-            extra_map = parse_extra_map(row["extra"])
+            extra_map = parse_extra(row["extra"])
             if row["path"] == name or extra_map.get("name") == name:
                 ids.append(row["id"])
         return ids

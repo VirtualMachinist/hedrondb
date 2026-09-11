@@ -77,12 +77,14 @@ hedron hql --db ./intent.db --format json 'vault my-vault | search "HedronDB" | 
 | Reads | `hedron hql` — read-only pipes |
 | Twin | `python/hql` must return the same JSON for the same pipeline |
 
-**Warm vs cool.** `state` is the latest desired-state spec/status (what is true now). `history` is the causal chain of that state (what superseded what). They are separate APIs and must not be mixed.
+**Named intents.** A vault holds any number of desired states, each with a unique name (`deploy`, `eod-2026-08-25`, …). Writing the same name again replaces the spec on the same id; `reconcile` bumps that id's version and appends an event. There is no "the vault's one state."
+
+**Warm vs cool.** `state` is a named desired state's spec/status now (what is true). `history` is the causal chain of that same state (what superseded what). They are separate APIs and must not be mixed.
 
 ## What you get
 
 - **`hedron import`** — walk a markdown tree into the store (wikilinks become `mentions`; unresolved targets are allowed).
-- **`hedron hql`** — operators `vault`, `agent`, `state`, `history`, `search`, `traverse`, `filter`, `select`, `limit`. Unknown operators (including `causal`) are rejected.
+- **`hedron hql`** — operators `vault`, `agent`, `state [NAME]`, `history [NAME]`, `search`, `traverse`, `filter`, `select`, `limit`. Unknown operators (including `causal`) are rejected.
 - **`hedron-import`** — thin alias of `hedron import`. Prefer `hedron import`.
 - **Rust/Python result twin** — `cargo test --test hql_twin` compares `hedron hql --format json` with `python3 -m hql`.
 
@@ -97,11 +99,11 @@ HQL is a small pipe language, not SQL. One string, two audiences:
 | Writes | none — HQL never mutates | none — HQL never mutates |
 | Proof | you can read the table | Rust CLI and `python/hql` must agree on the JSON |
 
-A person explores: search a vault, follow mentions, look at **what is true now** (`state`) or **how it got that way** (`history`). An agent does the same pipeline as a tool call and parses JSON. If the two ever disagree, that is a bug (`cargo test --test hql_twin`).
+A person explores: search a vault, follow mentions, list the vault's named intents (`vault prod | state`), look at **what is true now** for one of them (`agent deploy | state`, `state eod-2026-08-25`) or **how it got that way** (`history`). An agent does the same pipeline as a tool call and parses JSON. If the two ever disagree, that is a bug (`cargo test --test hql_twin`).
 
 Mutations are a different door: the `Store` API (tokens, reconcile). HQL cannot be used to “just update the row.” That split is the product: agents can look freely and cannot accidentally rewrite intent through a query.
 
-Operators: `vault`, `agent`, `state`, `history`, `search`, `traverse`, `filter`, `select`, `limit`. Unknown names are rejected. Details: [docs/HQL.md](docs/HQL.md).
+Operators: `vault`, `agent`, `state [NAME]`, `history [NAME]`, `search`, `traverse`, `filter`, `select`, `limit`. Unknown names are rejected. Details: [docs/HQL.md](docs/HQL.md).
 
 ## HedronDB and Facet
 
@@ -119,7 +121,7 @@ Neither product embeds the other. Wire them with a small CLI or MCP tool, scoped
 
 ## A real run
 
-You want two replicas of `web` Ready. Facet does the HTTP. HedronDB holds the intent. HQL is how you (or an agent) look.
+You want two replicas of `web` Ready. Facet does the HTTP. HedronDB holds the intent — a desired state **named `deploy`** in vault `prod`, next to whatever other intents that vault carries. HQL is how you (or an agent) look.
 
 **1. Call the cluster — Facet records what came back.**
 
@@ -131,7 +133,19 @@ facet history --sql "SELECT status, url FROM runs ORDER BY started_at DESC LIMIT
 
 **2. Ask HedronDB what we meant — same pipe for a human and an agent.**
 
-Human (table):
+List the vault's intents by name:
+
+```bash
+hedron hql --db ./intent.db 'vault prod | state'
+```
+
+```text
+path  name            state_version  reconciled_by  importance  id
+prod  deploy          2              <agent id>     0.8         <state id>
+prod  eod-2026-08-25  1              <agent id>     0.5         <state id>
+```
+
+Then the one named `deploy` — `agent deploy | state` selects the desired state whose name matches the agent, the same as `state deploy`. Human (table):
 
 ```bash
 hedron hql --db ./intent.db \
@@ -161,7 +175,7 @@ hedron hql --db ./intent.db --format json \
 ]
 ```
 
-`state` is **now** (latest desired vs observed). Version 2 is Reconciled: the cluster matches the spec. An agent parses the JSON; a person reads the table. HQL did not write anything.
+`state` is **now** (this intent's desired vs observed). Version 2 is Reconciled: the cluster matches the spec. Other intents in `prod` are untouched and unlisted here. An agent parses the JSON; a person reads the table. HQL did not write anything.
 
 **3. If it wasn’t Reconciled — look at how we got here.**
 
@@ -170,12 +184,14 @@ hedron hql --db ./intent.db --format json \
   'vault prod | agent deploy | history | select id, ts, reconciles, supersedes'
 ```
 
-`history` is **how it changed** (causal chain only — no spec payload). Facet’s Lattice still has the HTTP evidence for the same session; HedronDB still has the intent. You join them by IDs, not by dumping both into one database.
+`history` is **how it changed** — the events that reconciled the `deploy` state, oldest first (causal chain only — no spec payload). Facet’s Lattice still has the HTTP evidence for the same session; HedronDB still has the intent. You join them by IDs, not by dumping both into one database.
 
 ## How it works
 
 One file, two query paths, no network.
 
+- One schema source: `schema.sql` at the crate root. `Store`, the read-only HQL store, the tests and the Python twin all derive from it.
+- Desired states are named per vault (`UNIQUE (vault_id, name)`); `spec.kind` picks the reconciler (`docs_eod` today).
 - Store files should be mode `0600`.
 - Tokens live in process memory and rotate at the library gate. `hedron hql` does not take a token.
 - The crate is synchronous. No tokio, HTTP, or extra TCP ports.
@@ -187,7 +203,8 @@ One file, two query paths, no network.
 ```
 src/                  # hedron-core + hedron / hedron-import binaries
 tests/                # phase0, cli, hql, import, hql_twin
-python/hql/           # stdlib sqlite3 result-twin (read-only)
+python/hql/           # sqlite3 + PyYAML result-twin (read-only)
+schema.sql            # the one CREATE TABLE source
 assets/               # product mark
 docs/HQL.md           # query language
 .github/workflows/    # ci.yml, nightly.yml
@@ -199,12 +216,12 @@ docs/HQL.md           # query language
 
 Phase 0 is the working tree at **0.1.0**; track `main`.
 
-- **Store / vaults / desired state / causal log:** ready.
+- **Store / vaults / named desired states / causal log:** ready.
 - **HQL v0 + Python twin:** ready.
 - **Import:** ready.
 - **Not in this repo:** HTTP service, SQL as the query language, embeddings, a UI, or a cluster control plane.
 
-CI (`ubuntu-latest`, rustc 1.83) runs `cargo test` and a release build of `hedron`.
+CI (`ubuntu-latest`, rustc 1.83) runs `cargo test` and a release build of `hedron`. The Python twin needs `pyyaml` (`python3 -m pip install --user pyyaml`).
 
 ## Contributing
 

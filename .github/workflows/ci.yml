@@ -22,6 +22,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # python/hql reads nodes.extra with PyYAML; hql_twin shells out to it.
+      - name: PyYAML for the HQL twin
+        run: python3 -m pip install --user pyyaml
+
       # Includes hql_twin plus phase0 / cli / hql / import.
       - name: cargo test
         run: cargo test
