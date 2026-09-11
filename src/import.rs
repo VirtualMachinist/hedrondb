@@ -12,6 +12,8 @@ use crate::{DesiredState, Edge, Node, Store};
 
 const DEFAULT_EXCLUDE: &str = "inbox/private/";
 const BRIEFS_PREFIX: &str = "inbox";
+const ROLLBACK_TEST_ENV: &str = "HEDRON_IMPORT_TEST_ROLLBACK";
+
 const DROPPED_KEYS: &[&str] = &[
     "token",
     "api_key",
@@ -79,14 +81,41 @@ pub fn run(args: ImportArgs) -> Result<(), String> {
         fs::remove_file(&args.db).map_err(|err| err.to_string())?;
     }
 
-    let mut store = Store::open(&args.db).map_err(err_str)?;
     let htec = args
         .htec_path
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("agents/{}", args.agent));
+
+    let mut store = Store::open(&args.db).map_err(err_str)?;
+    store.begin().map_err(err_str)?;
+
+    match write_import(&mut store, &args, &htec) {
+        Ok((docs_len, resolved, dangling)) => {
+            store.commit().map_err(err_str)?;
+            let mode = store_mode(&args.db)?;
+            let mut out = io::stdout();
+            writeln!(out, "documents: {docs_len}").map_err(|err| err.to_string())?;
+            writeln!(out, "mentions_resolved: {resolved}").map_err(|err| err.to_string())?;
+            writeln!(out, "mentions_dangling: {dangling}").map_err(|err| err.to_string())?;
+            writeln!(out, "store: {}", store.path().display()).map_err(|err| err.to_string())?;
+            writeln!(out, "mode: {mode:04o}").map_err(|err| err.to_string())?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = store.rollback();
+            Err(err)
+        }
+    }
+}
+
+fn write_import(
+    store: &mut Store,
+    args: &ImportArgs,
+    htec: &str,
+) -> Result<(usize, usize, usize), String> {
     let boot = store
-        .bootstrap(&args.vault, &args.agent, &htec)
+        .bootstrap(&args.vault, &args.agent, htec)
         .map_err(err_str)?;
     let token = store.rotate_token(&boot.token).map_err(err_str)?;
     let vault_id = boot.vault.id;
@@ -151,23 +180,19 @@ pub fn run(args: ImportArgs) -> Result<(), String> {
             inbox
         };
         let briefs: Vec<&str> = source.iter().map(|doc| doc.stem.as_str()).collect();
-        let spec = DesiredState::briefs_spec(date, &briefs).map_err(err_str)?;
+        let spec = DesiredState::docs_eod_spec(date, &briefs).map_err(err_str)?;
         let ds = store
-            .put_desired_state(&token, spec, 0.5)
+            .put_desired_state(&token, &format!("eod-{date}"), spec, 0.5)
             .map_err(err_str)?;
-        store.observe(&token, ds.id).map_err(err_str)?;
         store.reconcile(&token, ds.id).map_err(err_str)?;
     }
 
-    let mode = store_mode(&args.db)?;
-    let mut out = io::stdout();
-    writeln!(out, "documents: {}", docs.len()).map_err(|err| err.to_string())?;
-    writeln!(out, "mentions_resolved: {resolved}").map_err(|err| err.to_string())?;
-    writeln!(out, "mentions_dangling: {dangling}").map_err(|err| err.to_string())?;
-    writeln!(out, "store: {}", store.path().display()).map_err(|err| err.to_string())?;
-    writeln!(out, "mode: {mode:04o}").map_err(|err| err.to_string())?;
+    if std::env::var(ROLLBACK_TEST_ENV).is_ok() {
+        return Err("import rollback test hook".into());
+    }
+
     let _ = token;
-    Ok(())
+    Ok((docs.len(), resolved, dangling))
 }
 
 struct Imported {

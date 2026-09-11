@@ -46,14 +46,7 @@ def _fields_of(rows: list[Row]) -> list[str]:
     first = rows[0]
     if first._selected is not None:
         return list(first._selected.keys())
-    return [
-        "path",
-        "from.path",
-        "to.path",
-        "to_id",
-        "to_raw",
-        "from_id",
-    ]
+    return first.default_fields()
 
 
 def _cell(value: Any) -> str:

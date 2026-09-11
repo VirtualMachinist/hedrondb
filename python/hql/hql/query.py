@@ -26,12 +26,13 @@ class Query:
         self._ops.append(("agent", name))
         return self
 
-    def state(self) -> "Query":
-        self._ops.append(("state",))
+    def state(self, name: Optional[str] = None) -> "Query":
+        """Every named desired state in scope, or the one called `name`."""
+        self._ops.append(("state", name))
         return self
 
-    def history(self) -> "Query":
-        self._ops.append(("history",))
+    def history(self, name: Optional[str] = None) -> "Query":
+        self._ops.append(("history", name))
         return self
 
     def search(self, text: str) -> "Query":
@@ -79,9 +80,9 @@ class Query:
             elif kind == "agent":
                 rows = _filter_agents(rows, op[1])
             elif kind == "state":
-                rows = _apply_state(rows, self._store.latest_desired_states())
+                rows = _apply_state(rows, op[1], self._store)
             elif kind == "history":
-                rows = _apply_history(rows, self._store)
+                rows = _apply_history(rows, op[1], self._store)
             elif kind == "search":
                 needle = op[1]
                 rows = [row for row in rows if _search_hit(row, needle, outgoing, by_id)]
@@ -111,13 +112,9 @@ class Query:
                 raise ValueError("agent requires a name")
             self.agent(_unquote_arg(rest))
         elif name == "state":
-            if rest:
-                raise ValueError("state takes no arguments")
-            self.state()
+            self.state(_unquote_arg(rest) if rest else None)
         elif name == "history":
-            if rest:
-                raise ValueError("history takes no arguments")
-            self.history()
+            self.history(_unquote_arg(rest) if rest else None)
         elif name == "search":
             self.search(_unquote_arg(rest))
         elif name == "traverse":
@@ -277,29 +274,84 @@ def _path_basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
-def _apply_state(rows: list[Row], latest: dict[str, dict]) -> list[Row]:
-    """Warm only: latest desired_states per vault_id. Does not read the event log."""
-    emitted: list[Row] = []
+def _select_states(
+    rows: list[Row], name: Optional[str], store: Store
+) -> list[tuple[Optional[Row], dict]]:
+    """Which desired states a slice selects, with the node that selected each.
+
+    Vault nodes in the slice: every named desired state of that vault (or the
+    one called `name`). Otherwise Agent nodes: `name`, or the state whose name
+    matches the agent (exact on extra.name / extra.title / path basename, then
+    substring). Otherwise: `name` in each vault the slice touches, no subject.
+    """
+    all_states = store.desired_states()
+
+    def in_vault(vault_id: Optional[str]) -> list[dict]:
+        return [ds for ds in all_states if ds["vault_id"] == vault_id]
+
+    def wanted(ds: dict) -> bool:
+        return name is None or ds["name"] == name
+
+    selected: list[tuple[Optional[Row], dict]] = []
+    vaults = [row for row in rows if row.node_id and row.node_type == "Vault"]
+    if vaults:
+        for vault in vaults:
+            for ds in in_vault(vault.vault_id):
+                if wanted(ds):
+                    selected.append((vault, ds))
+        return selected
+
+    agents = [row for row in rows if row.node_id and row.node_type == "Agent"]
+    if agents:
+        for agent in agents:
+            candidates = in_vault(agent.vault_id)
+            if name is not None:
+                picked = [ds for ds in candidates if ds["name"] == name]
+            else:
+                picked = _states_named_like(agent, candidates)
+            for ds in picked:
+                selected.append((agent, ds))
+        return selected
+
+    vault_ids: list[str] = []
     for row in rows:
-        if row.node_type not in ("Agent", "Vault"):
-            continue
-        ds = latest.get(row.vault_id or "")
-        if ds is None:
-            continue
-        emitted.append(row.with_state(ds))
-    return emitted
+        if row.vault_id and row.vault_id not in vault_ids:
+            vault_ids.append(row.vault_id)
+    for vault_id in vault_ids:
+        for ds in in_vault(vault_id):
+            if wanted(ds):
+                selected.append((None, ds))
+    return selected
 
 
-def _apply_history(rows: list[Row], store: Store) -> list[Row]:
-    """Cool only: causal_chain for the latest Desired State. No spec/status/data."""
-    latest = store.latest_desired_states()
+def _states_named_like(agent: Row, candidates: list[dict]) -> list[dict]:
+    keys = [
+        key
+        for key in (
+            agent.extra_map.get("name"),
+            agent.extra_map.get("title"),
+            _path_basename(agent.path or ""),
+        )
+        if key
+    ]
+    exact = [ds for ds in candidates if ds["name"] in keys]
+    if exact:
+        return exact
+    return [ds for ds in candidates if any(key in ds["name"] for key in keys)]
+
+
+def _apply_state(rows: list[Row], name: Optional[str], store: Store) -> list[Row]:
+    """Warm only: one row per selected desired state. Never reads events."""
+    return [
+        subject.with_state(ds) if subject is not None else Row.state_only(ds)
+        for subject, ds in _select_states(rows, name, store)
+    ]
+
+
+def _apply_history(rows: list[Row], name: Optional[str], store: Store) -> list[Row]:
+    """Cool only: causal events of each selected desired state. No spec/status/data."""
     emitted: list[Row] = []
-    for row in rows:
-        if row.node_type not in ("Agent", "Vault"):
-            continue
-        ds = latest.get(row.vault_id or "")
-        if ds is None:
-            continue
+    for _, ds in _select_states(rows, name, store):
         for event in store.causal_chain(ds["id"]):
             emitted.append(Row.from_history(event))
     return emitted

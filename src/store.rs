@@ -6,60 +6,20 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
+use crate::reconcile::reconciler_for;
 use crate::types::{
     content_hash, desired_state_hash, is_causal_type, reject_secrets, validate_importance,
-    version_ref, Bootstrap, Condition, ConditionKind, DesiredState, DocsEodSpec, Edge, Event, Node,
-    NodeType, Status, Tier, CAUSAL_CAUSED_BY, CAUSAL_RECONCILES, CAUSAL_SUPERSEDES, EDGE_GRANT,
+    version_ref, Bootstrap, DesiredState, Edge, Event, Node, NodeType, Status, Tier,
+    CAUSAL_CAUSED_BY, CAUSAL_RECONCILES, CAUSAL_SUPERSEDES, EDGE_GRANT,
 };
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS nodes (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    path TEXT,
-    version INTEGER NOT NULL,
-    tier TEXT NOT NULL,
-    importance REAL NOT NULL,
-    htec_path TEXT,
-    extra TEXT NOT NULL
-);
+/// Schema source: crate-root `schema.sql` (a copy of vault `store.sql`).
+/// One file; `Store`, `RoStore`, tests and the Python twin all derive from it.
+/// Never migrate an old file — `RoStore::schema_mismatches` reports drift.
+pub const SCHEMA_SQL: &str = include_str!("../schema.sql");
 
-CREATE TABLE IF NOT EXISTS edges (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    from_id TEXT NOT NULL,
-    to_id TEXT,
-    to_raw TEXT,
-    type TEXT NOT NULL,
-    properties TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS desired_states (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    last_reconciled INTEGER,
-    reconciled_by TEXT,
-    importance REAL NOT NULL,
-    spec TEXT NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    vault_id TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    actor TEXT NOT NULL,
-    type TEXT NOT NULL,
-    data TEXT NOT NULL,
-    caused_by TEXT NOT NULL,
-    reconciles TEXT,
-    supersedes TEXT
-);
-";
+const DS_COLUMNS: &str = "id, vault_id, name, state_version, content_hash, last_reconciled, \
+                          reconciled_by, importance, spec, status";
 
 #[derive(Clone)]
 struct Session {
@@ -79,7 +39,7 @@ impl Store {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path)?;
         lock_store_mode(&path)?;
-        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SCHEMA_SQL)?;
         Ok(Self {
             conn,
             path,
@@ -89,6 +49,23 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Open an outer transaction around several writes (import uses this so a
+    /// crash leaves no half graph). `reconcile` nests via a savepoint.
+    pub fn begin(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        Ok(())
+    }
+
+    pub fn commit(&self) -> Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    pub fn rollback(&self) -> Result<()> {
+        self.conn.execute_batch("ROLLBACK")?;
+        Ok(())
     }
 
     /// Create an isolated vault and bind an Agent (H.TEC is a path string).
@@ -222,20 +199,38 @@ impl Store {
         Ok(edge)
     }
 
+    /// Named intent, unique per vault. A second put with the same name upserts
+    /// the existing id: spec and hash change; version, status, reconciled_by
+    /// stay; no event (events are reconcile-only). `spec.kind` must name a
+    /// known reconciler.
     pub fn put_desired_state(
         &mut self,
         token: &str,
+        name: &str,
         spec: serde_yaml::Value,
         importance: f64,
     ) -> Result<DesiredState> {
         let session = self.auth(token)?.clone();
+        if name.is_empty() {
+            return Err(Error::Invalid("desired state name is required".into()));
+        }
         validate_importance(importance)?;
-        parse_briefs_spec(&spec)?;
+        reconciler_for(&spec)?;
+
+        if let Some(mut ds) = self.load_desired_state_by_name(session.vault_id, name)? {
+            ds.spec = spec;
+            ds.importance = importance;
+            ds.content_hash = desired_state_hash(&ds.spec, &ds.status, ds.state_version)?;
+            persist_desired_state_update(&self.conn, &ds)?;
+            return Ok(ds);
+        }
+
         let status = Status::empty();
         let state_version = 1;
         let ds = DesiredState {
             id: Uuid::new_v4(),
             vault_id: session.vault_id,
+            name: name.to_string(),
             state_version,
             content_hash: desired_state_hash(&spec, &status, state_version)?,
             last_reconciled: None,
@@ -248,18 +243,21 @@ impl Store {
         Ok(ds)
     }
 
-    /// Observe named briefs for the spec date. Updates status only (no version bump, no event).
+    /// Refresh status via the spec's reconciler. No version bump, no event.
     pub fn observe(&mut self, token: &str, desired_state_id: Uuid) -> Result<DesiredState> {
         let session = self.auth(token)?.clone();
         let mut ds = self.load_desired_state(desired_state_id)?;
         self.ensure_access(&session, ds.vault_id)?;
-        ds.status = self.observe_status(ds.vault_id, &ds.spec)?;
+        let docs = self.vault_documents(ds.vault_id)?;
+        ds.status = reconciler_for(&ds.spec)?.observe(&docs, &ds.spec)?.status;
         ds.content_hash = desired_state_hash(&ds.spec, &ds.status, ds.state_version)?;
-        self.update_desired_state(&ds)?;
+        persist_desired_state_update(&self.conn, &ds)?;
         Ok(ds)
     }
 
-    /// Reconcile: refresh status, bump version + hash, append a causal event (row first).
+    /// Reconcile: observe via the spec's reconciler, bump version + hash,
+    /// append the causal event and project its edges — one savepoint, so it
+    /// is atomic alone and nests inside `begin`/`commit`.
     pub fn reconcile(
         &mut self,
         token: &str,
@@ -270,14 +268,14 @@ impl Store {
         self.ensure_access(&session, ds.vault_id)?;
 
         let previous = version_ref(ds.id, ds.state_version);
-        let present_docs = self.matching_briefs(ds.vault_id, &ds.spec)?;
-        ds.status = status_from_docs(&parse_briefs_spec(&ds.spec)?, &present_docs);
+        let docs = self.vault_documents(ds.vault_id)?;
+        let observation = reconciler_for(&ds.spec)?.observe(&docs, &ds.spec)?;
+        ds.status = observation.status;
         ds.state_version += 1;
         ds.last_reconciled = Some(now_ms());
         ds.reconciled_by = Some(session.agent_id);
         ds.content_hash = desired_state_hash(&ds.spec, &ds.status, ds.state_version)?;
 
-        let caused_by: Vec<Uuid> = present_docs.iter().map(|(id, _)| *id).collect();
         let event = Event {
             id: Uuid::new_v4(),
             vault_id: ds.vault_id,
@@ -285,16 +283,16 @@ impl Store {
             actor: session.agent_id,
             event_type: "Reconciled".into(),
             data: serde_yaml::to_value(&ds.status.observed)?,
-            caused_by,
+            caused_by: observation.caused_by,
             reconciles: Some(ds.id),
             supersedes: Some(previous),
         };
 
-        let tx = self.conn.transaction()?;
-        persist_desired_state_update(&tx, &ds)?;
-        persist_event(&tx, &event)?;
-        project_causal_edges(&tx, &event)?;
-        tx.commit()?;
+        let sp = self.conn.savepoint()?;
+        persist_desired_state_update(&sp, &ds)?;
+        persist_event(&sp, &event)?;
+        project_causal_edges(&sp, &event)?;
+        sp.commit()?;
         Ok((ds, event))
     }
 
@@ -385,30 +383,19 @@ impl Store {
     }
 
     fn insert_edge(&self, edge: &Edge) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO edges (id, vault_id, from_id, to_id, to_raw, type, properties)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                edge.id.to_string(),
-                edge.vault_id.to_string(),
-                edge.from.to_string(),
-                edge.to_id.map(|id| id.to_string()),
-                edge.to_raw,
-                edge.edge_type,
-                serde_yaml::to_string(&edge.properties)?,
-            ],
-        )?;
-        Ok(())
+        insert_edge_conn(&self.conn, edge)
     }
 
     fn insert_desired_state(&self, ds: &DesiredState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO desired_states
-             (id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            &format!(
+                "INSERT INTO desired_states ({DS_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            ),
             params![
                 ds.id.to_string(),
                 ds.vault_id.to_string(),
+                ds.name,
                 ds.state_version as i64,
                 ds.content_hash,
                 ds.last_reconciled,
@@ -421,20 +408,30 @@ impl Store {
         Ok(())
     }
 
-    fn update_desired_state(&self, ds: &DesiredState) -> Result<()> {
-        persist_desired_state_update(&self.conn, ds)
-    }
-
     fn load_desired_state(&self, id: Uuid) -> Result<DesiredState> {
         self.conn
             .query_row(
-                "SELECT id, vault_id, state_version, content_hash, last_reconciled, reconciled_by, importance, spec, status
-                 FROM desired_states WHERE id = ?1",
+                &format!("SELECT {DS_COLUMNS} FROM desired_states WHERE id = ?1"),
                 params![id.to_string()],
                 desired_state_from_row,
             )
             .optional()?
             .ok_or(Error::NotFound("desired state"))
+    }
+
+    fn load_desired_state_by_name(
+        &self,
+        vault_id: Uuid,
+        name: &str,
+    ) -> Result<Option<DesiredState>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {DS_COLUMNS} FROM desired_states WHERE vault_id = ?1 AND name = ?2"),
+                params![vault_id.to_string(), name],
+                desired_state_from_row,
+            )
+            .optional()?)
     }
 
     fn desired_state_vault(&self, id: Uuid) -> Result<Uuid> {
@@ -450,49 +447,21 @@ impl Store {
         Uuid::parse_str(&raw).map_err(|err| Error::Invalid(err.to_string()))
     }
 
-    fn observe_status(&self, vault_id: Uuid, spec: &serde_yaml::Value) -> Result<Status> {
-        let parsed = parse_briefs_spec(spec)?;
-        let docs = self.matching_briefs(vault_id, spec)?;
-        Ok(status_from_docs(&parsed, &docs))
-    }
-
-    fn matching_briefs(
-        &self,
-        vault_id: Uuid,
-        spec: &serde_yaml::Value,
-    ) -> Result<Vec<(Uuid, String)>> {
-        let parsed = parse_briefs_spec(spec)?;
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, extra FROM nodes WHERE vault_id = ?1 AND type = ?2")?;
+    /// Every `Document` in the vault, for a reconciler to observe.
+    fn vault_documents(&self, vault_id: Uuid) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, vault_id, type, content_hash, path, version, tier, importance, htec_path, extra
+             FROM nodes WHERE vault_id = ?1 AND type = ?2",
+        )?;
         let rows = stmt.query_map(
             params![vault_id.to_string(), NodeType::Document.as_str()],
-            |row| {
-                let id: String = row.get(0)?;
-                let extra: String = row.get(1)?;
-                Ok((id, extra))
-            },
+            node_from_row,
         )?;
-
-        let mut found = Vec::new();
+        let mut docs = Vec::new();
         for row in rows {
-            let (id, extra_raw) = row?;
-            let extra: serde_yaml::Value = serde_yaml::from_str(&extra_raw)?;
-            let Some(brief) = extra.get("brief").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let date = extra.get("date").and_then(|v| v.as_str());
-            if date != Some(parsed.date.as_str()) {
-                continue;
-            }
-            if parsed.required_briefs.iter().any(|name| name == brief) {
-                found.push((
-                    Uuid::parse_str(&id).map_err(|err| Error::Invalid(err.to_string()))?,
-                    brief.to_string(),
-                ));
-            }
+            docs.push(row?);
         }
-        Ok(found)
+        Ok(docs)
     }
 }
 
@@ -601,76 +570,47 @@ fn insert_edge_conn(conn: &Connection, edge: &Edge) -> Result<()> {
     Ok(())
 }
 
-fn parse_briefs_spec(spec: &serde_yaml::Value) -> Result<DocsEodSpec> {
-    serde_yaml::from_value(spec.clone())
-        .map_err(|err| Error::Invalid(format!("desired state spec must be docs/EOD briefs: {err}")))
-}
-
-fn status_from_docs(spec: &DocsEodSpec, docs: &[(Uuid, String)]) -> Status {
-    let present: Vec<String> = spec
-        .required_briefs
-        .iter()
-        .filter(|name| docs.iter().any(|(_, brief)| brief == *name))
-        .cloned()
-        .collect();
-    let missing: Vec<String> = spec
-        .required_briefs
-        .iter()
-        .filter(|name| !present.iter().any(|p| p == *name))
-        .cloned()
-        .collect();
-
-    let (kind, message) = if missing.is_empty() {
-        (
-            ConditionKind::Reconciled,
-            Some("all required briefs are present".into()),
-        )
-    } else {
-        (
-            ConditionKind::Pending,
-            Some(format!("missing briefs: {}", missing.join(", "))),
-        )
-    };
-
-    let observed = serde_yaml::to_value(serde_yaml::Mapping::from_iter([
-        (
-            serde_yaml::Value::String("present".into()),
-            serde_yaml::to_value(&present).unwrap_or(serde_yaml::Value::Sequence(Vec::new())),
-        ),
-        (
-            serde_yaml::Value::String("missing".into()),
-            serde_yaml::to_value(&missing).unwrap_or(serde_yaml::Value::Sequence(Vec::new())),
-        ),
-    ]))
-    .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-
-    Status {
-        observed,
-        conditions: vec![Condition { kind, message }],
-    }
+fn node_from_row(row: &Row<'_>) -> rusqlite::Result<Node> {
+    let id = parse_uuid_row(row.get::<_, String>(0)?)?;
+    let vault_id = parse_uuid_row(row.get::<_, String>(1)?)?;
+    let node_type = NodeType::parse(&row.get::<_, String>(2)?).map_err(to_sql_err)?;
+    let tier = Tier::parse(&row.get::<_, String>(6)?).map_err(to_sql_err)?;
+    let extra_raw: String = row.get(9)?;
+    let extra: serde_yaml::Value = serde_yaml::from_str(&extra_raw).map_err(to_sql_err)?;
+    Ok(Node {
+        id,
+        vault_id,
+        node_type,
+        content_hash: row.get(3)?,
+        path: row.get(4)?,
+        version: row.get::<_, i64>(5)? as u64,
+        tier,
+        importance: row.get(7)?,
+        htec_path: row.get(8)?,
+        extra,
+    })
 }
 
 fn desired_state_from_row(row: &Row<'_>) -> rusqlite::Result<DesiredState> {
     let id = parse_uuid_row(row.get::<_, String>(0)?)?;
     let vault_id = parse_uuid_row(row.get::<_, String>(1)?)?;
-    let spec_raw: String = row.get(7)?;
-    let status_raw: String = row.get(8)?;
-    let spec: serde_yaml::Value = serde_yaml::from_str(&spec_raw)
-        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
-    let status: Status = serde_yaml::from_str(&status_raw)
-        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
-    let reconciled_by = match row.get::<_, Option<String>>(5)? {
+    let spec_raw: String = row.get(8)?;
+    let status_raw: String = row.get(9)?;
+    let spec: serde_yaml::Value = serde_yaml::from_str(&spec_raw).map_err(to_sql_err)?;
+    let status: Status = serde_yaml::from_str(&status_raw).map_err(to_sql_err)?;
+    let reconciled_by = match row.get::<_, Option<String>>(6)? {
         Some(raw) => Some(parse_uuid_row(raw)?),
         None => None,
     };
     Ok(DesiredState {
         id,
         vault_id,
-        state_version: row.get::<_, i64>(2)? as u64,
-        content_hash: row.get(3)?,
-        last_reconciled: row.get(4)?,
+        name: row.get(2)?,
+        state_version: row.get::<_, i64>(3)? as u64,
+        content_hash: row.get(4)?,
+        last_reconciled: row.get(5)?,
         reconciled_by,
-        importance: row.get(6)?,
+        importance: row.get(7)?,
         spec,
         status,
     })
@@ -682,10 +622,8 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     let actor = parse_uuid_row(row.get::<_, String>(3)?)?;
     let data_raw: String = row.get(5)?;
     let caused_raw: String = row.get(6)?;
-    let data: serde_yaml::Value = serde_yaml::from_str(&data_raw)
-        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
-    let caused_by: Vec<Uuid> = serde_yaml::from_str(&caused_raw)
-        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
+    let data: serde_yaml::Value = serde_yaml::from_str(&data_raw).map_err(to_sql_err)?;
+    let caused_by: Vec<Uuid> = serde_yaml::from_str(&caused_raw).map_err(to_sql_err)?;
     let reconciles = match row.get::<_, Option<String>>(7)? {
         Some(raw) => Some(parse_uuid_row(raw)?),
         None => None,
@@ -703,8 +641,12 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
+fn to_sql_err(err: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(err.to_string().into())
+}
+
 fn parse_uuid_row(raw: String) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(&raw).map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))
+    Uuid::parse_str(&raw).map_err(to_sql_err)
 }
 
 fn issue_token() -> String {

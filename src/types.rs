@@ -181,7 +181,8 @@ impl Status {
     }
 }
 
-/// Option B recon spec: named briefs that should exist for a date.
+/// `kind: docs_eod` spec body: named briefs that should exist for a date.
+/// `kind` itself is read by the dispatcher, not by this struct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocsEodSpec {
     pub date: String,
@@ -192,6 +193,8 @@ pub struct DocsEodSpec {
 pub struct DesiredState {
     pub id: Uuid,
     pub vault_id: Uuid,
+    /// Unique per vault; the id is stable across spec replacements.
+    pub name: String,
     pub state_version: u64,
     pub content_hash: String,
     pub last_reconciled: Option<i64>,
@@ -202,12 +205,20 @@ pub struct DesiredState {
 }
 
 impl DesiredState {
-    pub fn briefs_spec(date: &str, required_briefs: &[&str]) -> Result<serde_yaml::Value> {
-        let spec = DocsEodSpec {
+    /// A `kind: docs_eod` spec for `date` requiring `required_briefs`.
+    pub fn docs_eod_spec(date: &str, required_briefs: &[&str]) -> Result<serde_yaml::Value> {
+        let body = DocsEodSpec {
             date: date.to_string(),
             required_briefs: required_briefs.iter().map(|s| (*s).to_string()).collect(),
         };
-        Ok(serde_yaml::to_value(spec)?)
+        let mut spec = serde_yaml::to_value(body)?;
+        if let Some(map) = spec.as_mapping_mut() {
+            map.insert(
+                serde_yaml::Value::String("kind".into()),
+                serde_yaml::Value::String(crate::reconcile::DOCS_EOD_KIND.into()),
+            );
+        }
+        Ok(spec)
     }
 }
 
