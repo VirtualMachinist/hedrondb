@@ -63,13 +63,13 @@ const PIPE_FOUNDRY: &str = r#"vault demo-vault | search "HedronDB" | filter extr
 const PIPE_DANGLING: &str = r#"vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw"#;
 const PIPE_RESOLVED: &str = r#"vault demo-vault | filter path ^= "inbox/" && path !^= "inbox/private/" | traverse --edge mentions --hops 1 | filter to_id != null | select from.path, to.path"#;
 const PIPE_SESSION: &str =
-    "vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status";
-const PIPE_AGENT_STATE: &str = "agent leo | state | select path, extra.title, state_version, status, id, reconciled_by, importance";
+    "vault prod | agent deploy | state | select path, extra.name, extra.title, state_version, status";
+const PIPE_AGENT_STATE: &str = "agent deploy | state | select path, extra.title, state_version, status, id, reconciled_by, importance";
 const PIPE_NO_EVENTS: &str =
-    "vault htec-leo | agent leo | state | select path, spec, status, state_version, id";
-const PIPE_HISTORY: &str = "vault htec-leo | agent leo | history";
+    "vault prod | agent deploy | state | select path, spec, status, state_version, id";
+const PIPE_HISTORY: &str = "vault prod | agent deploy | history";
 const PIPE_HISTORY_SELECT: &str =
-    "vault htec-leo | agent leo | history | select id, ts, actor, type, caused_by, reconciles, supersedes, spec, status";
+    "vault prod | agent deploy | history | select id, ts, actor, type, caused_by, reconciles, supersedes, spec, status";
 
 struct TempDb {
     path: PathBuf,
@@ -160,13 +160,13 @@ fn build_session_db(path: &Path) {
     let agent = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?1, 'Vault', 'h', 'htec-leo', 1, 'cool', 1.0, 'name: htec-leo\n')",
+         VALUES (?1, ?1, 'Vault', 'h', 'prod', 1, 'cool', 1.0, 'name: prod\n')",
         [vault],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
-         VALUES (?1, ?2, 'Agent', 'h', 'agents/leo', 1, 'hot', 1.0, 'title: leo\n')",
+         VALUES (?1, ?2, 'Agent', 'h', 'agents/deploy', 1, 'hot', 1.0, 'title: deploy\n')",
         [agent, vault],
     )
     .unwrap();
@@ -326,10 +326,10 @@ fn rust_and_python_agree_agent_stays_in_vault() {
     build_session_db(&db.path);
     assert_twins(
         &db.path,
-        "vault htec-leo | agent leo | select path, extra.title",
+        "vault prod | agent deploy | select path, extra.title",
     );
     assert_twins(
         &db.path,
-        "vault no-such-vault | agent leo | select path, extra.title",
+        "vault no-such-vault | agent deploy | select path, extra.title",
     );
 }

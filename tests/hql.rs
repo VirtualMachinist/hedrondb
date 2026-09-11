@@ -79,7 +79,7 @@ const EVENT: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 const EVENT2: &str = "99999999-9999-9999-9999-999999999999";
 
 const PIPE_SESSION: &str =
-    "vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status";
+    "vault prod | agent deploy | state | select path, extra.name, extra.title, state_version, status";
 const STATUS_V1: &str = "conditions:\n- type: Pending\n";
 const STATUS_V2: &str = "conditions:\n- type: Reconciled\n";
 const SPEC: &str = "date: 2026-08-25\nrequired_briefs:\n- alpha\n";
@@ -172,13 +172,13 @@ fn build_session_db(path: &std::path::Path) {
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
          VALUES (?1, ?2, 'Vault', 'h', ?3, 1, 'cool', 1.0, ?4)",
-        rusqlite::params![VAULT_SESSION, VAULT_SESSION, "htec-leo", "name: htec-leo\n"],
+        rusqlite::params![VAULT_SESSION, VAULT_SESSION, "prod", "name: prod\n"],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO nodes (id, vault_id, type, content_hash, path, version, tier, importance, extra) \
          VALUES (?1, ?2, 'Agent', 'h', ?3, 1, 'hot', 1.0, ?4)",
-        rusqlite::params![AGENT, VAULT_SESSION, "agents/leo", "title: leo\n"],
+        rusqlite::params![AGENT, VAULT_SESSION, "agents/deploy", "title: deploy\n"],
     )
     .unwrap();
     conn.execute(
@@ -352,7 +352,7 @@ fn session_schema_matches_crate() {
 fn agent_state_pipe_returns_latest_version_only() {
     let db = TempDb::new("session-latest");
     build_session_db(&db.path);
-    let rows = run_pipeline(&db.path, "agent leo | state").unwrap();
+    let rows = run_pipeline(&db.path, "agent deploy | state").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("state_version"), Value::Int(2));
     let status = s(&rows[0], "status").unwrap_or_default();
@@ -364,14 +364,14 @@ fn agent_state_pipe_returns_latest_version_only() {
 }
 
 #[test]
-fn session_pipe_selects_htec_title() {
+fn session_pipe_selects_agent_title() {
     let db = TempDb::new("session-title");
     build_session_db(&db.path);
     let rows = run_pipeline(&db.path, PIPE_SESSION).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(s(&rows[0], "path").as_deref(), Some("agents/leo"));
+    assert_eq!(s(&rows[0], "path").as_deref(), Some("agents/deploy"));
     assert_eq!(rows[0].get("extra.name"), Value::Null);
-    assert_eq!(s(&rows[0], "extra.title").as_deref(), Some("leo"));
+    assert_eq!(s(&rows[0], "extra.title").as_deref(), Some("deploy"));
     assert_eq!(rows[0].get("state_version"), Value::Int(2));
     assert!(s(&rows[0], "status")
         .unwrap_or_default()
@@ -384,8 +384,8 @@ fn fluent_matches_session_pipe() {
     build_session_db(&db.path);
     let rows = Query::open(&db.path)
         .unwrap()
-        .vault("htec-leo")
-        .agent("leo")
+        .vault("prod")
+        .agent("deploy")
         .state()
         .select([
             "path",
@@ -409,11 +409,11 @@ fn fluent_matches_session_pipe() {
 fn agent_stays_inside_vault_slice() {
     let db = TempDb::new("session-vault");
     build_session_db(&db.path);
-    let inside = run_pipeline(&db.path, "vault htec-leo | agent leo").unwrap();
+    let inside = run_pipeline(&db.path, "vault prod | agent deploy").unwrap();
     assert_eq!(inside.len(), 1);
-    let outside = run_pipeline(&db.path, "vault no-such-vault | agent leo").unwrap();
+    let outside = run_pipeline(&db.path, "vault no-such-vault | agent deploy").unwrap();
     assert!(outside.is_empty());
-    let global_hit = run_pipeline(&db.path, "agent leo").unwrap();
+    let global_hit = run_pipeline(&db.path, "agent deploy").unwrap();
     assert_eq!(global_hit.len(), 1);
 }
 
@@ -421,12 +421,12 @@ fn agent_stays_inside_vault_slice() {
 fn agent_prefers_exact_title_and_accepts_substring() {
     let db = TempDb::new("session-substr");
     build_session_db(&db.path);
-    let exact = run_pipeline(&db.path, "agent leo").unwrap();
+    let exact = run_pipeline(&db.path, "agent deploy").unwrap();
     assert_eq!(exact.len(), 1);
-    assert_eq!(s(&exact[0], "extra.title").as_deref(), Some("leo"));
-    let substr = run_pipeline(&db.path, "agent le").unwrap();
+    assert_eq!(s(&exact[0], "extra.title").as_deref(), Some("deploy"));
+    let substr = run_pipeline(&db.path, "agent dep").unwrap();
     assert_eq!(substr.len(), 1);
-    assert_eq!(s(&substr[0], "path").as_deref(), Some("agents/leo"));
+    assert_eq!(s(&substr[0], "path").as_deref(), Some("agents/deploy"));
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn state_does_not_pull_event_log_or_tokens() {
     build_session_db(&db.path);
     let rows = run_pipeline(
         &db.path,
-        "vault htec-leo | agent leo | state | select path, spec, status, state_version, id",
+        "vault prod | agent deploy | state | select path, spec, status, state_version, id",
     )
     .unwrap();
     assert_eq!(rows.len(), 1);
@@ -460,7 +460,7 @@ fn state_does_not_pull_event_log_or_tokens() {
 fn default_columns_hide_spec_and_status() {
     let db = TempDb::new("session-hide");
     build_session_db(&db.path);
-    let rows = run_pipeline(&db.path, "agent leo | state").unwrap();
+    let rows = run_pipeline(&db.path, "agent deploy | state").unwrap();
     let fields = hedron_core::hql::fields_of(&rows);
     assert!(!fields.iter().any(|f| f == "spec" || f == "status"));
     assert!(s(&rows[0], "status")
@@ -472,7 +472,7 @@ fn default_columns_hide_spec_and_status() {
 fn causal_operator_is_out_of_scope() {
     let db = TempDb::new("session-causal");
     build_session_db(&db.path);
-    let err = run_pipeline(&db.path, "agent leo | causal").unwrap_err();
+    let err = run_pipeline(&db.path, "agent deploy | causal").unwrap_err();
     assert!(err.to_string().contains("unknown operator"));
 }
 
@@ -480,12 +480,12 @@ fn causal_operator_is_out_of_scope() {
 fn history_shows_latest_and_superseded_versions() {
     let db = TempDb::new("session-history");
     build_session_db(&db.path);
-    let state = run_pipeline(&db.path, "vault htec-leo | agent leo | state").unwrap();
+    let state = run_pipeline(&db.path, "vault prod | agent deploy | state").unwrap();
     assert_eq!(state.len(), 1);
     assert_eq!(state[0].get("state_version"), Value::Int(2));
     assert_eq!(s(&state[0], "id").as_deref(), Some(DS_V2));
 
-    let rows = run_pipeline(&db.path, "vault htec-leo | agent leo | history").unwrap();
+    let rows = run_pipeline(&db.path, "vault prod | agent deploy | history").unwrap();
     assert_eq!(rows.len(), 2);
     let ids: Vec<String> = rows
         .iter()
@@ -509,7 +509,7 @@ fn history_does_not_bleed_spec_status_or_payloads() {
     build_session_db(&db.path);
     let rows = run_pipeline(
         &db.path,
-        "vault htec-leo | agent leo | history | select id, spec, status, state_version, data, reconciles, supersedes",
+        "vault prod | agent deploy | history | select id, spec, status, state_version, data, reconciles, supersedes",
     )
     .unwrap();
     assert_eq!(rows.len(), 2);
@@ -537,15 +537,15 @@ fn fluent_matches_history_pipe() {
     build_session_db(&db.path);
     let rows = Query::open(&db.path)
         .unwrap()
-        .vault("htec-leo")
-        .agent("leo")
+        .vault("prod")
+        .agent("deploy")
         .history()
         .select(["id", "ts", "reconciles", "supersedes"])
         .run()
         .unwrap();
     let piped = run_pipeline(
         &db.path,
-        "vault htec-leo | agent leo | history | select id, ts, reconciles, supersedes",
+        "vault prod | agent deploy | history | select id, ts, reconciles, supersedes",
     )
     .unwrap();
     assert_eq!(rows.len(), 2);
@@ -555,13 +555,13 @@ fn fluent_matches_history_pipe() {
 }
 
 #[test]
-fn history_matches_store_causal_chain_on_elio() {
+fn history_matches_store_causal_chain() {
     let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let path =
-        std::env::temp_dir().join(format!("hedron-hql-elio-{}-{}.db", std::process::id(), n));
+        std::env::temp_dir().join(format!("hedron-hql-chain-{}-{}.db", std::process::id(), n));
     let _ = std::fs::remove_file(&path);
     let mut store = Store::open(&path).unwrap();
-    let boot = store.bootstrap("htec-elio", "elio", "agents/elio").unwrap();
+    let boot = store.bootstrap("prod", "deploy", "agents/deploy").unwrap();
     let spec = DesiredState::briefs_spec("2026-08-25", &["alpha"]).unwrap();
     let ds = store.put_desired_state(&boot.token, spec, 0.5).unwrap();
     let doc = Node::brief_document(boot.vault.id, "alpha", "2026-08-25").unwrap();
@@ -573,11 +573,11 @@ fn history_matches_store_causal_chain_on_elio() {
     assert_eq!(chain[0].id, ev1.id);
     assert_eq!(chain[1].id, ev2.id);
 
-    let state = run_pipeline(&path, "vault htec-elio | agent elio | state").unwrap();
+    let state = run_pipeline(&path, "vault prod | agent deploy | state").unwrap();
     assert_eq!(state.len(), 1);
     assert_eq!(state[0].get("state_version"), Value::Int(3));
 
-    let history = run_pipeline(&path, "vault htec-elio | agent elio | history").unwrap();
+    let history = run_pipeline(&path, "vault prod | agent deploy | history").unwrap();
     assert_eq!(history.len(), 2);
     let ev1_id = ev1.id.to_string();
     let ev2_id = ev2.id.to_string();
