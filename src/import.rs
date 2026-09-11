@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::{DesiredState, Edge, Node, Store};
 
-const DEFAULT_EXCLUDE: &str = "mail_room/Uri/";
+const DEFAULT_EXCLUDE: &str = "inbox/private/";
+const BRIEFS_PREFIX: &str = "inbox";
 const DROPPED_KEYS: &[&str] = &[
     "token",
     "api_key",
@@ -36,7 +37,7 @@ Options:
   --vault NAME           Vault to bootstrap
   --agent NAME           Agent to bootstrap
   --htec-path PATH       Optional H.TEC path prefix for imported documents
-  --exclude-prefix PRE   Skip this relative prefix (default: mail_room/Uri/)
+  --exclude-prefix PRE   Skip this relative prefix (default: inbox/private/)
   --briefs-date DATE     Optional Option B briefs recon after import
   --force                Replace an existing store file
   -h, --help             Print help
@@ -138,14 +139,16 @@ pub fn run(args: ImportArgs) -> Result<(), String> {
     }
 
     if let Some(date) = &args.briefs_date {
-        let mail_room: Vec<&Imported> = docs
+        let inbox: Vec<&Imported> = docs
             .iter()
-            .filter(|doc| doc.rel == "mail_room" || doc.rel.starts_with("mail_room/"))
+            .filter(|doc| {
+                doc.rel == BRIEFS_PREFIX || doc.rel.starts_with(&format!("{BRIEFS_PREFIX}/"))
+            })
             .collect();
-        let source: Vec<&Imported> = if mail_room.is_empty() {
+        let source: Vec<&Imported> = if inbox.is_empty() {
             docs.iter().collect()
         } else {
-            mail_room
+            inbox
         };
         let briefs: Vec<&str> = source.iter().map(|doc| doc.stem.as_str()).collect();
         let spec = DesiredState::briefs_spec(date, &briefs).map_err(err_str)?;
