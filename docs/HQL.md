@@ -29,8 +29,8 @@ Quote the pipeline so the shell is not the parser.
 ```text
 vault demo-vault | search "HedronDB" | filter extra.domain == "foundry" | select path, extra.name | limit 20
 vault demo-vault | search "lattice edges" | traverse --edge mentions --hops 1 | filter to_id == null | select path, to_raw
-vault htec-leo | agent leo | state | select path, extra.name, extra.title, state_version, status
-vault htec-elio | agent elio | history
+vault prod | agent deploy | state | select path, extra.name, extra.title, state_version, status
+vault prod | agent deploy | history
 ```
 
 Notes without `extra.domain` stay without it. A domain filter drops those rows; it does not infer or backfill.
