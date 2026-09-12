@@ -4,6 +4,7 @@
 //! CLI is `hedron` (`import`, `hql`). This crate is a sync rusqlite library —
 //! not a server, not a general-purpose database.
 
+mod contracts;
 mod error;
 pub mod hql;
 pub mod import;

@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
+use crate::contracts::validate_spec_shape;
 use crate::reconcile::reconciler_for;
 use crate::types::{
     content_hash, desired_state_hash, is_causal_type, reject_secrets, validate_importance,
@@ -216,6 +217,7 @@ impl Store {
         }
         validate_importance(importance)?;
         reconciler_for(&spec)?;
+        validate_spec_shape(&spec)?;
 
         if let Some(mut ds) = self.load_desired_state_by_name(session.vault_id, name)? {
             ds.spec = spec;
